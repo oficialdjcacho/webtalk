@@ -17,7 +17,9 @@
     .status{margin-top:8px}
     .dim{opacity:.7}
     .debug{font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#111; color:#ddd; padding:10px; border-radius:8px; margin-top:12px; white-space:pre-wrap}
-    .tag{display:inline-block;padding:2px 6px;border-radius:6px;background:#234;margin-right:6px}
+    .debug .ok{color:#9f9}
+    .debug .warn{color:#ff9}
+    .debug .err{color:#f99}
   </style>
 </head>
 <body>
@@ -33,11 +35,11 @@
 
   <div class="card" id="roomCard" style="display:none">
     <h3>Sala global <span class="dim">(mic siempre abierto)</span></h3>
-    <div class="row" style="gap:12px">
+    <div class="row">
       <button id="muteBtn">Mic: ON</button>
       <button id="motoBtn">Modo Moto: OFF</button>
       <button id="leaveBtn">Salir</button>
-      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto;display:flex;align-items:center;gap:6px">
+      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto">
         <input type="checkbox" id="turnOnly"/> Usar TURN-only (prueba)
       </label>
     </div>
@@ -92,17 +94,38 @@
   const wf = new Map(); // peerId -> { makingOffer, ignoreOffer, isSettingRemoteAnswer:false }
   const statsTimers = new Map(); // peerId -> setInterval
 
-  // ====== ICE SERVERS ======
-  const OPENRELAY = [
-    { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turns:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
-  ];
-  const STUNS = [
+  // ====== ICE SERVERS via API (Metered) ======
+  // No hardcodeamos usuario/clave. Obtenemos credenciales dinámicas.
+  const METERED_API = "https://intercommotero.metered.live/api/v1/turn/credentials?apiKey=1ce8cc00a5b893781ef1765ca24fb297fea3";
+
+  // STUN públicos como respaldo si la API falla
+  const FALLBACK_STUNS = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
   ];
-  // Cuando tengas tu propio TURN, reemplaza OPENRELAY por tu lista MY_TURN.
+
+  let cachedIce = null;
+  let cachedAt = 0;
+  const ICE_TTL_MS = 60 * 1000; // cache 60s
+
+  async function loadIceServers(){
+    const now = Date.now();
+    if (cachedIce && (now - cachedAt) < ICE_TTL_MS) return cachedIce;
+    try{
+      const resp = await fetch(METERED_API, { cache: "no-store" });
+      if(!resp.ok) throw new Error("HTTP "+resp.status);
+      const arr = await resp.json();
+      // Aseguramos que es un array válido; añadimos STUNs de respaldo por si acaso
+      const result = Array.isArray(arr) ? [...arr, ...FALLBACK_STUNS] : [...FALLBACK_STUNS];
+      cachedIce = result; cachedAt = now;
+      return result;
+    }catch(e){
+      console.warn("Fallo al cargar TURN creds desde API, usando STUN fallback:", e);
+      cachedIce = [...FALLBACK_STUNS]; cachedAt = now;
+      return cachedIce;
+    }
+  }
+  // ===========================================
 
   // Wake Lock (Modo Moto)
   let wakeLock = null;
@@ -250,15 +273,13 @@
   async function createPC(peerId){
     if(pcMap.has(peerId)) return pcMap.get(peerId);
 
-    // === Config RTC (TURN-only opcional) ===
-    const useTurnOnly = !!turnOnlyChk.checked; // marca el checkbox para forzar relay
+    // === ICE via API + opción TURN-only ===
+    const useTurnOnly = !!turnOnlyChk.checked;
+    const iceServers = await loadIceServers();
+
     const pc=new RTCPeerConnection({
-      iceServers: [
-        ...STUNS,
-        ...OPENRELAY
-      ],
-      iceTransportPolicy: useTurnOnly ? 'relay' : 'all',
-      // sdpSemantics por defecto ya es unified-plan, no tocamos más
+      iceServers,
+      iceTransportPolicy: useTurnOnly ? 'relay' : 'all'
     });
     // =======================================
 
@@ -275,17 +296,9 @@
       ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));
       renderPeers();
     };
-
-    // --- LOG de candidatos locales (para ver si aparecen relay/443) ---
     pc.onicecandidate=(ev)=>{
-      if(ev.candidate){
-        appendDiag(`local cand: ${ev.candidate.candidate}`);
-        wsSendSignal(peerId, { candidate: ev.candidate });
-      } else {
-        appendDiag(`local cand: (end of candidates)`);
-      }
+      if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate });
     };
-
     pc.onnegotiationneeded = async () => {
       const state = wf.get(peerId); if (!state) return;
       try {
@@ -297,15 +310,17 @@
       finally { state.makingOffer = false; }
     };
     pc.onconnectionstatechange=()=>{
-      diagUpdate(peerId);
+      diagUpdate(peerId); // actualiza panel
       const s=pc.connectionState;
       if(s==='failed' || s==='disconnected'){
         try{ pc.restartIce(); }catch(_){}
       }
     };
 
+    // === Diagnóstico ICE: muestra par seleccionado y tipo (host/srflx/relay) ===
     const timer = setInterval(()=>diagUpdate(peerId), 3000);
     statsTimers.set(peerId, timer);
+    // ==========================================================================
 
     renderPeers();
     return pc;
@@ -320,11 +335,14 @@
     pcMap.delete(peerId);
     streams.delete(peerId);
     wf.delete(peerId);
+
     const t = statsTimers.get(peerId);
     if (t) { clearInterval(t); statsTimers.delete(peerId); }
-    diagUpdate();
+    diagUpdate(); // refresca panel
   }
-  function closeAll(){ for (const pid of Array.from(pcMap.keys())) closePC(pid); }
+  function closeAll(){
+    for (const pid of Array.from(pcMap.keys())) closePC(pid);
+  }
 
   // ---- Diagnóstico ICE/getStats ----
   async function diagUpdate(peerId=null){
@@ -347,7 +365,7 @@
         if (sel){
           const local = stats.get(sel.localCandidateId);
           const remote = stats.get(sel.remoteCandidateId);
-          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol} ↔ remote=${remote?.candidateType}/${remote?.protocol}  RTT=${Math.round((sel.currentRoundTripTime||0)*1000)}ms\n`;
+          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol}  ↔  remote=${remote?.candidateType}/${remote?.protocol}  (${Math.round((sel.currentRoundTripTime||0)*1000)} ms RTT)\n`;
         } else {
           out += `  (no selected pair yet)\n`;
         }
@@ -357,10 +375,6 @@
       out += '\n';
     }
     debugBox.textContent = out.trim();
-  }
-  function appendDiag(line){
-    debugBox.hidden = false;
-    debugBox.textContent = (debugBox.textContent + '\n' + line).trim();
   }
 
   // ---- Recuperación al volver al primer plano ----
