@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <title>Intercom Motero</title>
+  <style>
+    :root{color-scheme:dark light}
+    body{font-family:system-ui,Arial,sans-serif;margin:16px}
+    .card{border:1px solid #9993;border-radius:12px;padding:16px;max-width:720px;margin:0 auto}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    input,button{padding:10px;border-radius:10px;border:1px solid #8886}
+    button{cursor:pointer}
+    #peers{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:8px}
+    .peer{border:1px solid #8884;border-radius:10px;padding:8px}
+    audio{width:100%}
+    .status{margin-top:8px}
+    .dim{opacity:.7}
+
+    /* Modo Moto: pantalla negra, elementos grandes y visibles */
+    #motoOverlay{
+      position:fixed; inset:0; background:#000; color:#fff;
+      display:none; align-items:center; justify-content:center; flex-direction:column;
+      z-index:9999;
+    }
+    #motoOverlay .big{
+      font-size:22px; padding:14px 20px; border-radius:14px; border:1px solid #555; margin:8px 0;
+      background:#111; color:#fff;
+    }
+    #motoOverlay .muted{ background:#4a0000; }
+    #motoOverlay .hint{ opacity:.6; margin-top:6px; font-size:14px }
+  </style>
+</head>
+<body>
+  <div class="card" id="loginCard">
+    <h2>Intercom Motero</h2>
+    <p>Introduce tu <b>nombre</b> y pulsa <b>Entrar</b>. Se habilitará el audio (requisito iOS).</p>
+    <div class="row">
+      <input id="nameInput" placeholder="Tu nombre" maxlength="64"/>
+      <button id="enterBtn">Entrar</button>
+    </div>
+    <div class="status" id="loginStatus"></div>
+  </div>
+
+  <div class="card" id="roomCard" style="display:none">
+    <h3>Sala global <span class="dim">(mic siempre abierto)</span></h3>
+    <div class="row">
+      <button id="muteBtn">Mic: ON</button>
+      <button id="motoBtn">Modo Moto: OFF</button>
+      <button id="leaveBtn">Salir</button>
+    </div>
+    <div class="status" id="connStatus">Conectando…</div>
+
+    <h4 style="margin-top:12px">Monitor local (opcional)</h4>
+    <audio id="localMonitor" autoplay playsinline muted></audio>
+
+    <h4>Participantes</h4>
+    <div id="peers"></div>
+  </div>
+
+  <!-- Overlay Modo Moto -->
+  <div id="motoOverlay">
+    <button id="overlayMute" class="big">Mic: ON</button>
+    <button id="overlayExit" class="big">Salir de Modo Moto</button>
+    <div class="hint">La pantalla se mantiene activa para no perder la comunicación.</div>
+  </div>
+
+<script>
+(() => {
+  const basePath = location.pathname.replace(/\/?$/, '');
+  const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + basePath + '/ws';
+
+  const loginCard = document.getElementById('loginCard');
+  const roomCard  = document.getElementById('roomCard');
+  const nameInput = document.getElementById('nameInput');
+  const enterBtn  = document.getElementById('enterBtn');
+  const loginStatus= document.getElementById('loginStatus');
+  const connStatus = document.getElementById('connStatus');
+  const muteBtn   = document.getElementById('muteBtn');
+  const motoBtn   = document.getElementById('motoBtn');
+  const leaveBtn  = document.getElementById('leaveBtn');
+  const peersDiv  = document.getElementById('peers');
+  const localMonitor = document.getElementById('localMonitor');
+  const motoOverlay = document.getElementById('motoOverlay');
+  const overlayMute = document.getElementById('overlayMute');
+  const overlayExit = document.getElementById('overlayExit');
+
+  let ws=null, wsConnected=false, wsRetryTimer=null, pingTimer=null;
+  let myId=null, myName='', joined=false;
+
+  const pcMap=new Map();        // peerId -> RTCPeerConnection
+  const streams=new Map();      // peerId -> MediaStream
+  const peerNames=new Map();    // peerId -> name
+  let localStream=null, micEnabled=true;
+
+  // Perfect Negotiation flags por peer
+  const wf = new Map(); // peerId -> { makingOffer, ignoreOffer, isSettingRemoteAnswer }
+
+  // Wake Lock (Modo Moto)
+  let wakeLock = null;
+  async function enableWakeLock(){
+    try{
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', ()=>{ /* noop */ });
+      }
+    }catch(e){ /* algunos navegadores no lo soportan */ }
+  }
+  async function disableWakeLock(){
+    try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){}
+  }
+
+  function speakDebounced(text, key, ms=3000){
+    const now=Date.now();
+    speakDebounced.cache = speakDebounced.cache || new Map();
+    const last = speakDebounced.cache.get(key) || 0;
+    if (now - last < ms) return;
+    speakDebounced.cache.set(key, now);
+    try{
+      const u=new SpeechSynthesisUtterance(text);
+      u.lang='es-ES'; u.rate=1.0;
+      speechSynthesis.speak(u);
+    }catch(_){}
+  }
+
+  function connectedCount(){ return 1 + streams.size; }
+  function niceName(pid){ return pid===myId ? `${myName} (tú)` : (peerNames.get(pid) || `ID: ${pid.slice(0,8)}…`); }
+  function renderPeers(){
+    peersDiv.innerHTML='';
+    connStatus.textContent = `Conectados: ${connectedCount()} | Tú: ${myName}`;
+    for(const [pid, stream] of streams.entries()){
+      const wrap=document.createElement('div'); wrap.className='peer';
+      const title=document.createElement('div'); title.textContent = niceName(pid);
+      const audio=document.createElement('audio'); audio.autoplay=true; audio.playsInline=true; audio.srcObject=stream;
+      wrap.appendChild(title); wrap.appendChild(audio);
+      peersDiv.appendChild(wrap);
+    }
+  }
+
+  // ---- Media ----
+  async function getMic(){
+    return await navigator.mediaDevices.getUserMedia({
+      audio:{ channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true, sampleRate:16000, sampleSize:16 },
+      video:false
+    });
+  }
+  async function ensureLocalStream(){
+    const needsNew = !localStream ||
+      localStream.getAudioTracks().length===0 ||
+      localStream.getAudioTracks().some(t => t.readyState==='ended');
+    if (needsNew) {
+      localStream = await getMic();
+      localMonitor.srcObject = localStream;
+    }
+    setMic(micEnabled);
+  }
+  function setMic(on){
+    micEnabled=on;
+    if(!localStream) return;
+    localStream.getAudioTracks().forEach(t=>t.enabled=on);
+    muteBtn.textContent = on ? 'Mic: ON' : 'Mic: OFF';
+    overlayMute.textContent = on ? 'Mic: ON' : 'Mic: OFF';
+    overlayMute.classList.toggle('muted', !on);
+  }
+
+  // ---- WS ----
+  function startPing(){ stopPing(); pingTimer=setInterval(()=>{ try{ ws && ws.send(JSON.stringify({type:'ping'})); }catch(_){} }, 10000); }
+  function stopPing(){ if(pingTimer){ clearInterval(pingTimer); pingTimer=null; } }
+  function scheduleReconnect(){
+    if(wsRetryTimer) return;
+    wsRetryTimer = setInterval(()=>{
+      if(wsConnected || !joined) { clearInterval(wsRetryTimer); wsRetryTimer=null; return; }
+      connectWS();
+      for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){}
+    }, 1500);
+  }
+  function connectWS(){
+    try { ws && ws.close(); } catch(_){}
+    ws=new WebSocket(WS_URL);
+    ws.onopen=()=>{ wsConnected=true; startPing(); ws.send(JSON.stringify({type:'join', name: myName})); };
+    ws.onclose=()=>{ wsConnected=false; stopPing(); scheduleReconnect(); };
+    ws.onerror=()=>{ wsConnected=false; stopPing(); scheduleReconnect(); };
+    ws.onmessage=async ev=>{
+      const msg=JSON.parse(ev.data); const t=msg.type;
+
+      if(t==='joined'){
+        // Limpieza total y micro válido
+        closeAll(); peerNames.clear();
+        myId = msg.clientId;
+        try{ await ensureLocalStream(); }catch(e){ connStatus.textContent='Micrófono no disponible: '+e; return; }
+
+        const peers=msg.peers||[];
+        for(const p of peers){ peerNames.set(p.clientId, p.name||'Usuario'); }
+        renderPeers();
+        for(const p of peers){ await createPC(p.clientId); }
+        return;
+      }
+
+      if(t==='peer-joined'){
+        peerNames.set(msg.clientId, msg.name || 'Usuario');
+        speakDebounced(`${msg.name || 'Usuario'} se ha conectado`, `join:${msg.clientId}`);
+        if(!pcMap.has(msg.clientId)) await createPC(msg.clientId);
+        renderPeers(); return;
+      }
+
+      if(t==='peer-left'){
+        speakDebounced(`${msg.name || 'Usuario'} se ha desconectado`, `left:${msg.clientId}`);
+        closePC(msg.clientId); peerNames.delete(msg.clientId); renderPeers(); return;
+      }
+
+      if(t==='signal'){
+        const {fromId,payload}=msg;
+        if(!pcMap.has(fromId)) await createPC(fromId);
+        await handleSignal(fromId, payload);
+        return;
+      }
+
+      if(t==='ice-restart'){
+        for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){}
+        return;
+      }
+    };
+  }
+
+  // ---- Perfect Negotiation ----
+  async function handleSignal(peerId, payload){
+    const pc = pcMap.get(peerId);
+    const state = wf.get(peerId) || { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false };
+    wf.set(peerId, state);
+
+    try{
+      if (payload.sdp) {
+        const desc = payload.sdp;
+        const offerCollision = (desc.type === "offer") && (state.makingOffer || pc.signalingState !== "stable");
+        state.ignoreOffer = !isPolite(peerId) && offerCollision;
+        if (state.ignoreOffer) return;
+
+        if (desc.type === "answer") state.isSettingRemoteAnswer = true;
+        await pc.setRemoteDescription(desc);
+        state.isSettingRemoteAnswer = false;
+
+        if (desc.type === "offer") {
+          await ensureLocalStream();
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          wsSendSignal(peerId, { sdp: pc.localDescription });
+        }
+      } else if (payload.candidate) {
+        try { await pc.addIceCandidate(payload.candidate); } catch (err) {
+          if (!state.ignoreOffer) throw err;
+        }
+      }
+    } catch (e) {
+      try { await pc.setLocalDescription({ type:"rollback" }); } catch(_){}
+    }
+  }
+  function isPolite(peerId){ return myId > peerId; }
+  function wsSendSignal(targetId, payload){ if (wsConnected) ws.send(JSON.stringify({ type:"signal", targetId, payload })); }
+
+  async function createPC(peerId){
+    if(pcMap.has(peerId)) return pcMap.get(peerId);
+
+    const pc=new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" }
+        // TURN se añadirá en despliegue para 4G/5G
+      ]
+    });
+    pcMap.set(peerId, pc);
+    wf.set(peerId, { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false });
+
+    await ensureLocalStream();
+    localStream.getTracks().forEach(tr=>pc.addTrack(tr, localStream));
+
+    const remoteStream=new MediaStream();
+    streams.set(peerId, remoteStream);
+
+    pc.ontrack=(ev)=>{
+      ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));
+      renderPeers();
+    };
+    pc.onicecandidate=(ev)=>{
+      if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate });
+    };
+    pc.onnegotiationneeded = async () => {
+      const state = wf.get(peerId); if (!state) return;
+      try {
+        state.makingOffer = true;
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        wsSendSignal(peerId, { sdp: pc.localDescription });
+      } catch(_) {}
+      finally { state.makingOffer = false; }
+    };
+    pc.onconnectionstatechange=()=>{
+      const s=pc.connectionState;
+      if(s==='failed' || s==='disconnected'){
+        try{ pc.restartIce(); }catch(_){}
+      }
+    };
+
+    renderPeers();
+    return pc;
+  }
+
+  function closePC(peerId){
+    const pc=pcMap.get(peerId);
+    if(pc){
+      try{ pc.getSenders().forEach(s=>{ try{ pc.removeTrack(s); }catch(_){}});}catch(_){}
+      try{ pc.close(); }catch(_){}
+    }
+    pcMap.delete(peerId);
+    streams.delete(peerId);
+    wf.delete(peerId);
+  }
+  function closeAll(){ for (const pid of Array.from(pcMap.keys())) closePC(pid); }
+
+  // ---- Recuperación al volver al primer plano ----
+  async function refreshMicAndRenegotiate(){
+    if (!joined) return;
+    try{
+      await ensureLocalStream();
+      // replaceTrack en todos los peers
+      for (const [pid, pc] of pcMap.entries()) {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+        const newTrack = localStream.getAudioTracks()[0];
+        if (sender && newTrack && sender.track !== newTrack) {
+          await sender.replaceTrack(newTrack);
+        }
+        // Forzar negociación limpia
+        try{
+          const state = wf.get(pid); if (!state) continue;
+          state.makingOffer = true;
+          const offer = await pc.createOffer({ iceRestart: true });
+          await pc.setLocalDescription(offer);
+          wsSendSignal(pid, { sdp: pc.localDescription });
+        }finally{
+          const state2 = wf.get(pid); if (state2) state2.makingOffer = false;
+        }
+      }
+    }catch(e){ /* si el usuario negó micrófono, no podemos hacer más */ }
+  }
+
+  // ---- UI ----
+  enterBtn.addEventListener('click', async ()=>{
+    myName=(nameInput.value||'').trim()||'Anon';
+    try{ await ensureLocalStream(); localMonitor.srcObject=localStream; setMic(true); }
+    catch(e){ loginStatus.textContent='No se pudo acceder al micrófono: '+e; return; }
+
+    loginCard.style.display='none'; roomCard.style.display='block';
+    joined=true; connectWS();
+  });
+
+  muteBtn.addEventListener('click', ()=>setMic(!micEnabled));
+
+  leaveBtn.addEventListener('click', async ()=>{
+    joined=false;
+    try{ ws && ws.close(); }catch(_){}
+    stopPing();
+    if (wsRetryTimer) { clearInterval(wsRetryTimer); wsRetryTimer=null; }
+    await disableWakeLock();
+    motoOverlay.style.display='none';
+    closeAll();
+    if(localStream) localStream.getTracks().forEach(t=>t.stop());
+    localStream=null; streams.clear(); pcMap.clear(); peerNames.clear();
+    roomCard.style.display='none'; loginCard.style.display='block';
+  });
+
+  // ----- Modo Moto -----
+  motoBtn.addEventListener('click', async ()=>{
+    if (motoOverlay.style.display==='flex') {
+      await disableWakeLock();
+      motoOverlay.style.display='none';
+      motoBtn.textContent='Modo Moto: OFF';
+      return;
+    }
+    await enableWakeLock();
+    motoOverlay.style.display='flex';
+    motoBtn.textContent='Modo Moto: ON';
+  });
+  overlayExit.addEventListener('click', async ()=>{
+    await disableWakeLock();
+    motoOverlay.style.display='none';
+    motoBtn.textContent='Modo Moto: OFF';
+  });
+  overlayMute.addEventListener('click', ()=>setMic(!micEnabled));
+
+  // Reintento al recuperar conectividad / foco
+  window.addEventListener('online', ()=>{ if(joined && !wsConnected) connectWS(); });
+  document.addEventListener('visibilitychange', async ()=>{
+    // Al volver a visible, rearmar micro y renegociar
+    if(document.visibilityState==='visible' && joined){
+      await refreshMicAndRenegotiate();
+      // Re-pedir wake lock si estaba activo y el SO lo liberó
+      if (motoOverlay.style.display==='flex' && !wakeLock) await enableWakeLock();
+    }
+    // Si pasa a hidden y no estás en Modo Moto, el SO podría dormir la app
+  });
+})();
+</script>
+</body>
+</html>
