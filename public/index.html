@@ -17,9 +17,7 @@
     .status{margin-top:8px}
     .dim{opacity:.7}
     .debug{font:12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#111; color:#ddd; padding:10px; border-radius:8px; margin-top:12px; white-space:pre-wrap}
-    .debug .ok{color:#9f9}
-    .debug .warn{color:#ff9}
-    .debug .err{color:#f99}
+    .tag{display:inline-block;padding:2px 6px;border-radius:6px;background:#234;margin-right:6px}
   </style>
 </head>
 <body>
@@ -35,11 +33,11 @@
 
   <div class="card" id="roomCard" style="display:none">
     <h3>Sala global <span class="dim">(mic siempre abierto)</span></h3>
-    <div class="row">
+    <div class="row" style="gap:12px">
       <button id="muteBtn">Mic: ON</button>
       <button id="motoBtn">Modo Moto: OFF</button>
       <button id="leaveBtn">Salir</button>
-      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto">
+      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto;display:flex;align-items:center;gap:6px">
         <input type="checkbox" id="turnOnly"/> Usar TURN-only (prueba)
       </label>
     </div>
@@ -94,8 +92,7 @@
   const wf = new Map(); // peerId -> { makingOffer, ignoreOffer, isSettingRemoteAnswer:false }
   const statsTimers = new Map(); // peerId -> setInterval
 
-  // ====== CONFIG ICE SERVERS ======
-  // PRUEBA/DEMO: OpenRelay público (puede saturarse). Funciona bien para verificar problema NAT.
+  // ====== ICE SERVERS ======
   const OPENRELAY = [
     { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
     { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
@@ -105,14 +102,7 @@
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
   ];
-
-  // 👉 Cuando tengas tus credenciales de TURN propias, reemplaza este array:
-  // const MY_TURN = [
-  //   { urls: "turns:tu-turn.example.com:5349?transport=tcp", username: "USER", credential: "PASS" },
-  //   { urls: "turn:tu-turn.example.com:3478?transport=udp",   username: "USER", credential: "PASS" }
-  // ];
-
-  // ================================
+  // Cuando tengas tu propio TURN, reemplaza OPENRELAY por tu lista MY_TURN.
 
   // Wake Lock (Modo Moto)
   let wakeLock = null;
@@ -260,16 +250,17 @@
   async function createPC(peerId){
     if(pcMap.has(peerId)) return pcMap.get(peerId);
 
-    // === Configuración RTC con opción TURN-only para pruebas ===
-    const useTurnOnly = !!turnOnlyChk.checked;
+    // === Config RTC (TURN-only opcional) ===
+    const useTurnOnly = !!turnOnlyChk.checked; // marca el checkbox para forzar relay
     const pc=new RTCPeerConnection({
       iceServers: [
         ...STUNS,
-        ...OPENRELAY, // Cambia por MY_TURN cuando tengas tus credenciales
+        ...OPENRELAY
       ],
-      iceTransportPolicy: useTurnOnly ? 'relay' : 'all' // <— si marcas el checkbox, fuerza TURN
+      iceTransportPolicy: useTurnOnly ? 'relay' : 'all',
+      // sdpSemantics por defecto ya es unified-plan, no tocamos más
     });
-    // ===========================================================
+    // =======================================
 
     pcMap.set(peerId, pc);
     wf.set(peerId, { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false });
@@ -284,9 +275,17 @@
       ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));
       renderPeers();
     };
+
+    // --- LOG de candidatos locales (para ver si aparecen relay/443) ---
     pc.onicecandidate=(ev)=>{
-      if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate });
+      if(ev.candidate){
+        appendDiag(`local cand: ${ev.candidate.candidate}`);
+        wsSendSignal(peerId, { candidate: ev.candidate });
+      } else {
+        appendDiag(`local cand: (end of candidates)`);
+      }
     };
+
     pc.onnegotiationneeded = async () => {
       const state = wf.get(peerId); if (!state) return;
       try {
@@ -298,17 +297,15 @@
       finally { state.makingOffer = false; }
     };
     pc.onconnectionstatechange=()=>{
-      diagUpdate(peerId); // actualiza panel
+      diagUpdate(peerId);
       const s=pc.connectionState;
       if(s==='failed' || s==='disconnected'){
         try{ pc.restartIce(); }catch(_){}
       }
     };
 
-    // === Diagnóstico ICE: muestra par seleccionado y tipo (host/srflx/relay) ===
     const timer = setInterval(()=>diagUpdate(peerId), 3000);
     statsTimers.set(peerId, timer);
-    // ==========================================================================
 
     renderPeers();
     return pc;
@@ -323,14 +320,11 @@
     pcMap.delete(peerId);
     streams.delete(peerId);
     wf.delete(peerId);
-
     const t = statsTimers.get(peerId);
     if (t) { clearInterval(t); statsTimers.delete(peerId); }
-    diagUpdate(); // refresca panel
+    diagUpdate();
   }
-  function closeAll(){
-    for (const pid of Array.from(pcMap.keys())) closePC(pid);
-  }
+  function closeAll(){ for (const pid of Array.from(pcMap.keys())) closePC(pid); }
 
   // ---- Diagnóstico ICE/getStats ----
   async function diagUpdate(peerId=null){
@@ -353,7 +347,7 @@
         if (sel){
           const local = stats.get(sel.localCandidateId);
           const remote = stats.get(sel.remoteCandidateId);
-          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol}  ↔  remote=${remote?.candidateType}/${remote?.protocol}  (${Math.round((sel.currentRoundTripTime||0)*1000)} ms RTT)\n`;
+          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol} ↔ remote=${remote?.candidateType}/${remote?.protocol}  RTT=${Math.round((sel.currentRoundTripTime||0)*1000)}ms\n`;
         } else {
           out += `  (no selected pair yet)\n`;
         }
@@ -363,6 +357,10 @@
       out += '\n';
     }
     debugBox.textContent = out.trim();
+  }
+  function appendDiag(line){
+    debugBox.hidden = false;
+    debugBox.textContent = (debugBox.textContent + '\n' + line).trim();
   }
 
   // ---- Recuperación al volver al primer plano ----
