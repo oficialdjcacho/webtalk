@@ -262,8 +262,12 @@
 
     const pc=new RTCPeerConnection({
       iceServers: [
-        { urls: "stun:stun.l.google.com:19302" }
-        // TURN se añadirá en despliegue para 4G/5G
+        // STUN (más de uno, por robustez)
+        { urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] },
+        // TURN público de pruebas (OpenRelay) — útil para 4G/Wi-Fi restrictivas
+        { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
+        { urls: "turns:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" }
       ]
     });
     pcMap.set(peerId, pc);
