@@ -39,7 +39,7 @@
       <button id="muteBtn">Mic: ON</button>
       <button id="motoBtn">Modo Moto: OFF</button>
       <button id="leaveBtn">Salir</button>
-      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto">
+      <label title="Fuerza TURN (relay) por 5349/TLS para probar redes móviles restrictivas" style="margin-left:auto">
         <input type="checkbox" id="turnOnly"/> Usar TURN-only (prueba)
       </label>
     </div>
@@ -94,38 +94,27 @@
   const wf = new Map(); // peerId -> { makingOffer, ignoreOffer, isSettingRemoteAnswer:false }
   const statsTimers = new Map(); // peerId -> setInterval
 
-  // ====== ICE SERVERS via API (Metered) ======
-  // No hardcodeamos usuario/clave. Obtenemos credenciales dinámicas.
-  const METERED_API = "https://intercommotero.metered.live/api/v1/turn/credentials?apiKey=1ce8cc00a5b893781ef1765ca24fb297fea3";
+  // ====== ICE SERVERS: TU CoTURN (sin Metered) ======
+  // Usamos tu servidor doméstico y añadimos dos STUN públicos de respaldo.
+  const ICE_STATIC = [
+    // Tu STUN/CACHO
+    { urls: ["stun:cachofotos.ddns.net:3478"] },
 
-  // STUN públicos como respaldo si la API falla
-  const FALLBACK_STUNS = [
+    // Tu TURN: mejor ofrecer variantes para maximizar compatibilidad
+    { urls: ["turn:cachofotos.ddns.net:3478?transport=udp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
+    { urls: ["turn:cachofotos.ddns.net:3478?transport=tcp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
+    { urls: ["turns:cachofotos.ddns.net:5349"],              username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
+
+    // STUNs públicos de respaldo (por si tu STUN no responde)
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
   ];
 
-  let cachedIce = null;
-  let cachedAt = 0;
-  const ICE_TTL_MS = 60 * 1000; // cache 60s
-
+  // Mantengo la firma de la función para no tocar más código:
   async function loadIceServers(){
-    const now = Date.now();
-    if (cachedIce && (now - cachedAt) < ICE_TTL_MS) return cachedIce;
-    try{
-      const resp = await fetch(METERED_API, { cache: "no-store" });
-      if(!resp.ok) throw new Error("HTTP "+resp.status);
-      const arr = await resp.json();
-      // Aseguramos que es un array válido; añadimos STUNs de respaldo por si acaso
-      const result = Array.isArray(arr) ? [...arr, ...FALLBACK_STUNS] : [...FALLBACK_STUNS];
-      cachedIce = result; cachedAt = now;
-      return result;
-    }catch(e){
-      console.warn("Fallo al cargar TURN creds desde API, usando STUN fallback:", e);
-      cachedIce = [...FALLBACK_STUNS]; cachedAt = now;
-      return cachedIce;
-    }
+    return ICE_STATIC;
   }
-  // ===========================================
+  // ================================================
 
   // Wake Lock (Modo Moto)
   let wakeLock = null;
@@ -273,7 +262,7 @@
   async function createPC(peerId){
     if(pcMap.has(peerId)) return pcMap.get(peerId);
 
-    // === ICE via API + opción TURN-only ===
+    // === ICE con tu CoTURN + opción TURN-only ===
     const useTurnOnly = !!turnOnlyChk.checked;
     const iceServers = await loadIceServers();
 
@@ -281,7 +270,7 @@
       iceServers,
       iceTransportPolicy: useTurnOnly ? 'relay' : 'all'
     });
-    // =======================================
+    // ============================================
 
     pcMap.set(peerId, pc);
     wf.set(peerId, { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false });
@@ -296,9 +285,7 @@
       ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));
       renderPeers();
     };
-    pc.onicecandidate=(ev)=>{
-      if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate });
-    };
+    pc.onicecandidate=(ev)=>{ if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate }); };
     pc.onnegotiationneeded = async () => {
       const state = wf.get(peerId); if (!state) return;
       try {
@@ -310,17 +297,16 @@
       finally { state.makingOffer = false; }
     };
     pc.onconnectionstatechange=()=>{
-      diagUpdate(peerId); // actualiza panel
+      diagUpdate(peerId);
       const s=pc.connectionState;
       if(s==='failed' || s==='disconnected'){
         try{ pc.restartIce(); }catch(_){}
       }
     };
 
-    // === Diagnóstico ICE: muestra par seleccionado y tipo (host/srflx/relay) ===
+    // Diagnóstico ICE/getStats
     const timer = setInterval(()=>diagUpdate(peerId), 3000);
     statsTimers.set(peerId, timer);
-    // ==========================================================================
 
     renderPeers();
     return pc;
@@ -338,11 +324,9 @@
 
     const t = statsTimers.get(peerId);
     if (t) { clearInterval(t); statsTimers.delete(peerId); }
-    diagUpdate(); // refresca panel
+    diagUpdate();
   }
-  function closeAll(){
-    for (const pid of Array.from(pcMap.keys())) closePC(pid);
-  }
+  function closeAll(){ for (const pid of Array.from(pcMap.keys())) closePC(pid); }
 
   // ---- Diagnóstico ICE/getStats ----
   async function diagUpdate(peerId=null){
@@ -385,9 +369,7 @@
       for (const [pid, pc] of pcMap.entries()) {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
         const newTrack = localStream.getAudioTracks()[0];
-        if (sender && newTrack && sender.track !== newTrack) {
-          await sender.replaceTrack(newTrack);
-        }
+        if (sender && newTrack && sender.track !== newTrack) { await sender.replaceTrack(newTrack); }
         try{
           const state = wf.get(pid); if (!state) continue;
           state.makingOffer = true;
