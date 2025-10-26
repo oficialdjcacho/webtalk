@@ -97,38 +97,67 @@
   // ====== ICE SERVERS: TU CoTURN (sin Metered) ======
   // Usamos tu servidor doméstico y añadimos dos STUN públicos de respaldo.
   const ICE_STATIC = [
-    // Tu STUN/CACHO
     { urls: ["stun:cachofotos.ddns.net:3478"] },
-
-    // Tu TURN: mejor ofrecer variantes para maximizar compatibilidad
     { urls: ["turn:cachofotos.ddns.net:3478?transport=udp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
     { urls: ["turn:cachofotos.ddns.net:3478?transport=tcp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
     { urls: ["turns:cachofotos.ddns.net:5349"],              username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
-
-    // STUNs públicos de respaldo (por si tu STUN no responde)
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
   ];
-
-  // Mantengo la firma de la función para no tocar más código:
-  async function loadIceServers(){
-    return ICE_STATIC;
-  }
+  async function loadIceServers(){ return ICE_STATIC; }
   // ================================================
 
-  // Wake Lock (Modo Moto)
-  let wakeLock = null;
-  async function enableWakeLock(){ try{ if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){} }
-  async function disableWakeLock(){ try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){} }
+  // ========= TTS fiable (inicialización tras gesto de usuario) =========
+  let ttsReady = false;
 
-  function speakDebounced(text, key, ms=3000){
+  async function initTTS(){
+    try{
+      // limpiar cualquier cola previa
+      try { speechSynthesis.cancel(); } catch(_) {}
+
+      // esperar a que carguen las voces
+      const waitVoices = new Promise(resolve => {
+        const voices = speechSynthesis.getVoices();
+        if (voices && voices.length) return resolve();
+        speechSynthesis.addEventListener('voiceschanged', resolve, { once:true });
+        setTimeout(resolve, 1500); // fallback
+      });
+      await waitVoices;
+
+      // “priming” silencioso/corto
+      const probe = new SpeechSynthesisUtterance('listo');
+      probe.lang = 'es-ES';
+      probe.rate = 1.0;
+      probe.volume = 0.01;
+      speechSynthesis.speak(probe);
+
+      ttsReady = true;
+    } catch(_) {
+      ttsReady = false;
+    }
+  }
+
+  async function speakDebounced(text, key, ms=3000){
     const now=Date.now();
     speakDebounced.cache = speakDebounced.cache || new Map();
     const last = speakDebounced.cache.get(key) || 0;
     if (now - last < ms) return;
     speakDebounced.cache.set(key, now);
-    try{ const u=new SpeechSynthesisUtterance(text); u.lang='es-ES'; u.rate=1.0; speechSynthesis.speak(u); }catch(_){}
+
+    try{
+      if (!ttsReady) { await initTTS(); }
+      const u=new SpeechSynthesisUtterance(text);
+      u.lang='es-ES';
+      u.rate=1.0;
+      speechSynthesis.speak(u);
+    }catch(_){}
   }
+  // =====================================================================
+
+  // Wake Lock (Modo Moto)
+  let wakeLock = null;
+  async function enableWakeLock(){ try{ if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){} }
+  async function disableWakeLock(){ try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){} }
 
   function connectedCount(){ return 1 + streams.size; }
   function niceName(pid){ return pid===myId ? `${myName} (tú)` : (peerNames.get(pid) || `ID: ${pid.slice(0,8)}…`); }
@@ -386,8 +415,15 @@
   // ---- UI ----
   enterBtn.addEventListener('click', async ()=>{
     myName=(nameInput.value||'').trim()||'Anon';
-    try{ await ensureLocalStream(); localMonitor.srcObject=localStream; setMic(true); }
-    catch(e){ loginStatus.textContent='No se pudo acceder al micrófono: '+e; return; }
+    try{
+      await ensureLocalStream();
+      localMonitor.srcObject=localStream;
+      setMic(true);
+      await initTTS(); // inicializa TTS tras gesto de usuario
+    }
+    catch(e){
+      loginStatus.textContent='No se pudo acceder al micrófono: '+e; return;
+    }
 
     loginCard.style.display='none'; roomCard.style.display='block';
     joined=true; connectWS();
@@ -412,6 +448,8 @@
       await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF'; return;
     }
     await enableWakeLock(); motoOverlay.style.display='flex'; motoBtn.textContent='Modo Moto: ON';
+    // (opcional) re-primear TTS al entrar en modo moto:
+    try{ if (!ttsReady) await initTTS(); }catch(_){}
   });
   overlayExit.addEventListener('click', async ()=>{
     await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF';
