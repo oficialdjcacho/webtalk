@@ -27,6 +27,9 @@ webtalk/
 ├── package.json
 └── public/
     └── index.html
+    └── js/
+        └── native-mic.bootstrap.js
+        └── native-mic-worklet.js
 ```
 
 ### Run locally
