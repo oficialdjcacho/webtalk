@@ -307,6 +307,12 @@
     await ensureLocalStream();
     localStream.getTracks().forEach(tr=>pc.addTrack(tr, localStream));
 
+    /* === Nativo: intentar sustituir el micrófono si está disponible (Android+Capacitor) === */
+    if (window.replaceMicWithNative) {
+      try { window.replaceMicWithNative(pc); } catch (e) { console.warn('replaceMicWithNative error', e); }
+    }
+    /* ===================================================================================== */
+
     const remoteStream=new MediaStream();
     streams.set(peerId, remoteStream);
 
@@ -467,6 +473,8 @@
 
 })();
 </script>
+
+<!-- Nativo: define window.replaceMicWithNative si está disponible (Android + Capacitor) -->
+<script type="module" src="/js/native-mic.bootstrap.js"></script>
 </body>
 </html>
-
