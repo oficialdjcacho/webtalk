@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>Intercom Motero</title>
+  <title>WebTalk by DjCacho</title>
   <style>
     :root{color-scheme:dark light}
     body{font-family:system-ui,Arial,sans-serif;margin:16px}
@@ -24,7 +24,7 @@
 </head>
 <body>
   <div class="card" id="loginCard">
-    <h2>Intercom Motero</h2>
+    <h2>WebTalk</h2>
     <p>Introduce tu <b>nombre</b> y pulsa <b>Entrar</b>. Se habilitará el audio (requisito iOS).</p>
     <div class="row">
       <input id="nameInput" placeholder="Tu nombre" maxlength="64"/>
@@ -39,7 +39,7 @@
       <button id="muteBtn">Mic: ON</button>
       <button id="motoBtn">Modo Moto: OFF</button>
       <button id="leaveBtn">Salir</button>
-      <label title="Fuerza TURN (relay) por 443/TLS para probar redes móviles restrictivas" style="margin-left:auto">
+      <label title="Fuerza TURN (relay) por 5349/TLS para probar redes móviles restrictivas" style="margin-left:auto">
         <input type="checkbox" id="turnOnly"/> Usar TURN-only (prueba)
       </label>
     </div>
@@ -86,76 +86,71 @@
   let ws=null, wsConnected=false, wsRetryTimer=null, pingTimer=null;
   let myId=null, myName='', joined=false;
 
-  const pcMap=new Map();        // peerId -> RTCPeerConnection
-  const streams=new Map();      // peerId -> MediaStream
-  const peerNames=new Map();    // peerId -> name
+  const pcMap=new Map();
+  const streams=new Map();
+  const peerNames=new Map();
   let localStream=null, micEnabled=true;
 
-  const wf = new Map(); // peerId -> { makingOffer, ignoreOffer, isSettingRemoteAnswer:false }
-  const statsTimers = new Map(); // peerId -> setInterval
+  const wf = new Map();
+  const statsTimers = new Map();
 
-  // ====== ICE SERVERS via API (Metered) ======
-  // No hardcodeamos usuario/clave. Obtenemos credenciales dinámicas.
-  const METERED_API = "https://intercommotero.metered.live/api/v1/turn/credentials?apiKey=1ce8cc00a5b893781ef1765ca24fb297fea3";
-
-  // STUN públicos como respaldo si la API falla
-  const FALLBACK_STUNS = [
+  const ICE_STATIC = [
+    { urls: ["stun:cachofotos.ddns.net:3478"] },
+    { urls: ["turn:cachofotos.ddns.net:3478?transport=udp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
+    { urls: ["turn:cachofotos.ddns.net:3478?transport=tcp"], username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
+    { urls: ["turns:cachofotos.ddns.net:5349"],              username: "djcacho", credential: "4+ymh5XaTXzAVkUB" },
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" }
   ];
+  async function loadIceServers(){ return ICE_STATIC; }
 
-  let cachedIce = null;
-  let cachedAt = 0;
-  const ICE_TTL_MS = 60 * 1000; // cache 60s
-
-  async function loadIceServers(){
-    const now = Date.now();
-    if (cachedIce && (now - cachedAt) < ICE_TTL_MS) return cachedIce;
+  let ttsReady = false;
+  async function initTTS(){
     try{
-      const resp = await fetch(METERED_API, { cache: "no-store" });
-      if(!resp.ok) throw new Error("HTTP "+resp.status);
-      const arr = await resp.json();
-      // Aseguramos que es un array válido; añadimos STUNs de respaldo por si acaso
-      const result = Array.isArray(arr) ? [...arr, ...FALLBACK_STUNS] : [...FALLBACK_STUNS];
-      cachedIce = result; cachedAt = now;
-      return result;
-    }catch(e){
-      console.warn("Fallo al cargar TURN creds desde API, usando STUN fallback:", e);
-      cachedIce = [...FALLBACK_STUNS]; cachedAt = now;
-      return cachedIce;
-    }
+      try { speechSynthesis.cancel(); } catch(_) {}
+      const waitVoices = new Promise(resolve => {
+        const voices = speechSynthesis.getVoices();
+        if (voices && voices.length) return resolve();
+        speechSynthesis.addEventListener('voiceschanged', resolve, { once:true });
+        setTimeout(resolve, 1500);
+      });
+      await waitVoices;
+      const probe = new SpeechSynthesisUtterance('listo');
+      probe.lang = 'es-ES'; probe.rate = 1.0; probe.volume = 0.01;
+      speechSynthesis.speak(probe);
+      ttsReady = true;
+    } catch(_) { ttsReady = false; }
   }
-  // ===========================================
-
-  // Wake Lock (Modo Moto)
-  let wakeLock = null;
-  async function enableWakeLock(){ try{ if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){} }
-  async function disableWakeLock(){ try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){} }
-
-  function speakDebounced(text, key, ms=3000){
+  async function speakDebounced(text, key, ms=3000){
     const now=Date.now();
     speakDebounced.cache = speakDebounced.cache || new Map();
     const last = speakDebounced.cache.get(key) || 0;
     if (now - last < ms) return;
     speakDebounced.cache.set(key, now);
-    try{ const u=new SpeechSynthesisUtterance(text); u.lang='es-ES'; u.rate=1.0; speechSynthesis.speak(u); }catch(_){}
+    try{
+      if (!ttsReady) { await initTTS(); }
+      const u=new SpeechSynthesisUtterance(text);
+      u.lang='es-ES'; u.rate=1.0;
+      speechSynthesis.speak(u);
+    }catch(_){}
   }
+
+  let wakeLock = null;
+  async function enableWakeLock(){ try{ if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){} }
+  async function disableWakeLock(){ try{ if (wakeLock) { await wakeLock.release(); wakeLock=null; } }catch(_){} }
 
   function connectedCount(){ return 1 + streams.size; }
   function niceName(pid){ return pid===myId ? `${myName} (tú)` : (peerNames.get(pid) || `ID: ${pid.slice(0,8)}…`); }
   function renderPeers(){
-    peersDiv.innerHTML='';
-    connStatus.textContent = `Conectados: ${connectedCount()} | Tú: ${myName}`;
+    peersDiv.innerHTML=''; connStatus.textContent = `Conectados: ${connectedCount()} | Tú: ${myName}`;
     for(const [pid, stream] of streams.entries()){
       const wrap=document.createElement('div'); wrap.className='peer';
       const title=document.createElement('div'); title.textContent = niceName(pid);
       const audio=document.createElement('audio'); audio.autoplay=true; audio.playsInline=true; audio.srcObject=stream;
-      wrap.appendChild(title); wrap.appendChild(audio);
-      peersDiv.appendChild(wrap);
+      wrap.appendChild(title); wrap.appendChild(audio); peersDiv.appendChild(wrap);
     }
   }
 
-  // ---- Media ----
   async function getMic(){
     return await navigator.mediaDevices.getUserMedia({
       audio:{ channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true, sampleRate:16000, sampleSize:16 },
@@ -163,34 +158,23 @@
     });
   }
   async function ensureLocalStream(){
-    const needsNew = !localStream ||
-      localStream.getAudioTracks().length===0 ||
-      localStream.getAudioTracks().some(t => t.readyState==='ended');
-    if (needsNew) {
-      localStream = await getMic();
-      localMonitor.srcObject = localStream;
-    }
+    const needsNew = !localStream || localStream.getAudioTracks().length===0 || localStream.getAudioTracks().some(t => t.readyState==='ended');
+    if (needsNew) { localStream = await getMic(); localMonitor.srcObject = localStream; }
     setMic(micEnabled);
   }
   function setMic(on){
-    micEnabled=on;
-    if(!localStream) return;
+    micEnabled=on; if(!localStream) return;
     localStream.getAudioTracks().forEach(t=>t.enabled=on);
     muteBtn.textContent = on ? 'Mic: ON' : 'Mic: OFF';
     overlayMute.textContent = on ? 'Mic: ON' : 'Mic: OFF';
     overlayMute.classList.toggle('muted', !on);
   }
 
-  // ---- WS ----
   function startPing(){ stopPing(); pingTimer=setInterval(()=>{ try{ ws && ws.send(JSON.stringify({type:'ping'})); }catch(_){} }, 10000); }
   function stopPing(){ if(pingTimer){ clearInterval(pingTimer); pingTimer=null; } }
   function scheduleReconnect(){
     if(wsRetryTimer) return;
-    wsRetryTimer = setInterval(()=>{
-      if(wsConnected || !joined) { clearInterval(wsRetryTimer); wsRetryTimer=null; return; }
-      connectWS();
-      for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){}
-    }, 1500);
+    wsRetryTimer = setInterval(()=>{ if(wsConnected || !joined){ clearInterval(wsRetryTimer); wsRetryTimer=null; return; } connectWS(); for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){}} ,1500);
   }
   function connectWS(){
     try { ws && ws.close(); } catch(_){}
@@ -200,58 +184,32 @@
     ws.onerror=()=>{ wsConnected=false; stopPing(); scheduleReconnect(); };
     ws.onmessage=async ev=>{
       const msg=JSON.parse(ev.data); const t=msg.type;
-
       if(t==='joined'){
-        closeAll(); peerNames.clear();
-        myId = msg.clientId;
+        closeAll(); peerNames.clear(); myId = msg.clientId;
         try{ await ensureLocalStream(); }catch(e){ connStatus.textContent='Micrófono no disponible: '+e; return; }
-
-        const peers=msg.peers||[];
-        for(const p of peers){ peerNames.set(p.clientId, p.name||'Usuario'); }
-        renderPeers();
-        for(const p of peers){ await createPC(p.clientId); }
-        return;
+        const peers=msg.peers||[]; for(const p of peers){ peerNames.set(p.clientId, p.name||'Usuario'); }
+        renderPeers(); for(const p of peers){ await createPC(p.clientId); } return;
       }
-      if(t==='peer-joined'){
-        peerNames.set(msg.clientId, msg.name || 'Usuario');
-        speakDebounced(`${msg.name || 'Usuario'} se ha conectado`, `join:${msg.clientId}`);
-        if(!pcMap.has(msg.clientId)) await createPC(msg.clientId);
-        renderPeers(); return;
-      }
-      if(t==='peer-left'){
-        speakDebounced(`${msg.name || 'Usuario'} se ha desconectado`, `left:${msg.clientId}`);
-        closePC(msg.clientId); peerNames.delete(msg.clientId); renderPeers(); return;
-      }
-      if(t==='signal'){
-        const {fromId,payload}=msg;
-        if(!pcMap.has(fromId)) await createPC(fromId);
-        await handleSignal(fromId, payload);
-        return;
-      }
-      if(t==='ice-restart'){
-        for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){}
-        return;
-      }
+      if(t==='peer-joined'){ peerNames.set(msg.clientId, msg.name || 'Usuario'); speakDebounced(`${msg.name || 'Usuario'} se ha conectado`, `join:${msg.clientId}`); if(!pcMap.has(msg.clientId)) await createPC(msg.clientId); renderPeers(); return; }
+      if(t==='peer-left'){ speakDebounced(`${msg.name || 'Usuario'} se ha desconectado`, `left:${msg.clientId}`); closePC(msg.clientId); peerNames.delete(msg.clientId); renderPeers(); return; }
+      if(t==='signal'){ const {fromId,payload}=msg; if(!pcMap.has(fromId)) await createPC(fromId); await handleSignal(fromId, payload); return; }
+      if(t==='ice-restart'){ for(const [,pc] of pcMap) try{ pc.restartIce(); }catch(_){ } return; }
     };
   }
 
-  // ---- Perfect Negotiation ----
   async function handleSignal(peerId, payload){
     const pc = pcMap.get(peerId);
     const state = wf.get(peerId) || { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false };
     wf.set(peerId, state);
-
     try{
       if (payload.sdp) {
         const desc = payload.sdp;
         const offerCollision = (desc.type === "offer") && (state.makingOffer || pc.signalingState !== "stable");
         state.ignoreOffer = !isPolite(peerId) && offerCollision;
         if (state.ignoreOffer) return;
-
         if (desc.type === "answer") state.isSettingRemoteAnswer = true;
         await pc.setRemoteDescription(desc);
         state.isSettingRemoteAnswer = false;
-
         if (desc.type === "offer") {
           await ensureLocalStream();
           const answer = await pc.createAnswer();
@@ -259,92 +217,39 @@
           wsSendSignal(peerId, { sdp: pc.localDescription });
         }
       } else if (payload.candidate) {
-        try { await pc.addIceCandidate(payload.candidate); } catch (err) {
-          if (!state.ignoreOffer) throw err;
-        }
+        try { await pc.addIceCandidate(payload.candidate); } catch (err) { if (!state.ignoreOffer) throw err; }
       }
-    } catch (e) {
-      try { await pc.setLocalDescription({ type:"rollback" }); } catch(_){}
-    }
+    } catch (e) { try { await pc.setLocalDescription({ type:"rollback" }); } catch(_){ } }
   }
   function isPolite(peerId){ return myId > peerId; }
   function wsSendSignal(targetId, payload){ if (wsConnected) ws.send(JSON.stringify({ type:"signal", targetId, payload })); }
 
   async function createPC(peerId){
     if(pcMap.has(peerId)) return pcMap.get(peerId);
-
-    // === ICE via API + opción TURN-only ===
     const useTurnOnly = !!turnOnlyChk.checked;
     const iceServers = await loadIceServers();
-
-    const pc=new RTCPeerConnection({
-      iceServers,
-      iceTransportPolicy: useTurnOnly ? 'relay' : 'all'
-    });
-    // =======================================
-
+    const pc=new RTCPeerConnection({ iceServers, iceTransportPolicy: useTurnOnly ? 'relay' : 'all' });
     pcMap.set(peerId, pc);
     wf.set(peerId, { makingOffer:false, ignoreOffer:false, isSettingRemoteAnswer:false });
-
     await ensureLocalStream();
     localStream.getTracks().forEach(tr=>pc.addTrack(tr, localStream));
-
-    const remoteStream=new MediaStream();
-    streams.set(peerId, remoteStream);
-
-    pc.ontrack=(ev)=>{
-      ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t));
-      renderPeers();
-    };
-    pc.onicecandidate=(ev)=>{
-      if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate });
-    };
+    if (window.replaceMicWithNative) { try { window.replaceMicWithNative(pc); } catch (e) { console.warn('replaceMicWithNative error', e); } }
+    const remoteStream=new MediaStream(); streams.set(peerId, remoteStream);
+    pc.ontrack=(ev)=>{ ev.streams[0].getTracks().forEach(t=>remoteStream.addTrack(t)); renderPeers(); };
+    pc.onicecandidate=(ev)=>{ if(ev.candidate) wsSendSignal(peerId, { candidate: ev.candidate }); };
     pc.onnegotiationneeded = async () => {
       const state = wf.get(peerId); if (!state) return;
-      try {
-        state.makingOffer = true;
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        wsSendSignal(peerId, { sdp: pc.localDescription });
-      } catch(_) {}
-      finally { state.makingOffer = false; }
+      try { state.makingOffer = true; const offer = await pc.createOffer(); await pc.setLocalDescription(offer); wsSendSignal(peerId, { sdp: pc.localDescription }); }
+      catch(_){} finally { state.makingOffer = false; }
     };
-    pc.onconnectionstatechange=()=>{
-      diagUpdate(peerId); // actualiza panel
-      const s=pc.connectionState;
-      if(s==='failed' || s==='disconnected'){
-        try{ pc.restartIce(); }catch(_){}
-      }
-    };
-
-    // === Diagnóstico ICE: muestra par seleccionado y tipo (host/srflx/relay) ===
-    const timer = setInterval(()=>diagUpdate(peerId), 3000);
-    statsTimers.set(peerId, timer);
-    // ==========================================================================
-
-    renderPeers();
-    return pc;
+    pc.onconnectionstatechange=()=>{ diagUpdate(peerId); const s=pc.connectionState; if(s==='failed'||s==='disconnected'){ try{ pc.restartIce(); }catch(_){}}};
+    const timer = setInterval(()=>diagUpdate(peerId), 3000); statsTimers.set(peerId, timer);
+    renderPeers(); return pc;
   }
 
-  function closePC(peerId){
-    const pc=pcMap.get(peerId);
-    if(pc){
-      try{ pc.getSenders().forEach(s=>{ try{ pc.removeTrack(s); }catch(_){}});}catch(_){}
-      try{ pc.close(); }catch(_){}
-    }
-    pcMap.delete(peerId);
-    streams.delete(peerId);
-    wf.delete(peerId);
+  function closePC(peerId){ const pc=pcMap.get(peerId); if(pc){ try{ pc.close(); }catch(_){}} pcMap.delete(peerId); streams.delete(peerId); wf.delete(peerId); const t = statsTimers.get(peerId); if (t){ clearInterval(t); statsTimers.delete(peerId); } diagUpdate(); }
+  function closeAll(){ for (const pid of Array.from(pcMap.keys())) closePC(pid); }
 
-    const t = statsTimers.get(peerId);
-    if (t) { clearInterval(t); statsTimers.delete(peerId); }
-    diagUpdate(); // refresca panel
-  }
-  function closeAll(){
-    for (const pid of Array.from(pcMap.keys())) closePC(pid);
-  }
-
-  // ---- Diagnóstico ICE/getStats ----
   async function diagUpdate(peerId=null){
     if (!pcMap.size){ debugBox.hidden = true; return; }
     debugBox.hidden = false;
@@ -352,32 +257,33 @@
     for (const [pid, pc] of pcMap.entries()){
       out += `Peer ${niceName(pid)}  |  conn=${pc.connectionState}  ice=${pc.iceConnectionState}\n`;
       try{
-        const stats = await pc.getStats();
-        let sel = null;
-        stats.forEach(r=>{
-          if (r.type === 'transport' && r.selectedCandidatePairId) {
-            sel = stats.get(r.selectedCandidatePairId);
-          }
-        });
-        if (!sel){
-          stats.forEach(r=>{ if (r.type==='candidate-pair' && r.nominated) sel = r; });
-        }
+        const stats = await pc.getStats(); let sel=null;
+        stats.forEach(r=>{ if (r.type === 'transport' && r.selectedCandidatePairId) sel = stats.get(r.selectedCandidatePairId); });
+        if (!sel){ stats.forEach(r=>{ if (r.type==='candidate-pair' && r.nominated) sel = r; }); }
         if (sel){
           const local = stats.get(sel.localCandidateId);
           const remote = stats.get(sel.remoteCandidateId);
-          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol}  ↔  remote=${remote?.candidateType}/${remote?.protocol}  (${Math.round((sel.currentRoundTripTime||0)*1000)} ms RTT)\n`;
-        } else {
-          out += `  (no selected pair yet)\n`;
-        }
-      }catch(e){
-        out += `  stats error: ${e}\n`;
-      }
+          out += `  ⇄ selected pair: local=${local?.candidateType}/${local?.protocol} ↔ remote=${remote?.candidateType}/${remote?.protocol} (${Math.round((sel.currentRoundTripTime||0)*1000)} ms RTT)\n`;
+        } else { out += `  (no selected pair yet)\n`; }
+      }catch(e){ out += `  stats error: ${e}\n`; }
       out += '\n';
     }
     debugBox.textContent = out.trim();
   }
 
-  // ---- Recuperación al volver al primer plano ----
+  // ====== LOGGING AMPLIADO ======
+  const log = (...args) => {
+    console.log('[WebTalk]', ...args);
+    const t = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 2) : a).join(' ');
+    debugBox.hidden = false;
+    debugBox.textContent = (debugBox.textContent + '\n' + t).split('\n').slice(-40).join('\n');
+  };
+  const oldWsSendSignal = wsSendSignal;
+  wsSendSignal = function(targetId, payload){ log('📤 Señal enviada a', targetId, payload.sdp ? payload.sdp.type : payload.candidate ? 'ICE' : payload); oldWsSendSignal(targetId, payload); };
+  const oldCreatePC = createPC;
+  createPC = async function(peerId){ const pc = await oldCreatePC(peerId); log('🆕 RTCPeerConnection creada para', peerId); pc.addEventListener('iceconnectionstatechange', ()=>log('ICE', peerId, pc.iceConnectionState)); pc.addEventListener('connectionstatechange', ()=>log('CONN', peerId, pc.connectionState)); return pc; };
+  // ============================================
+
   async function refreshMicAndRenegotiate(){
     if (!joined) return;
     try{
@@ -385,67 +291,25 @@
       for (const [pid, pc] of pcMap.entries()) {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
         const newTrack = localStream.getAudioTracks()[0];
-        if (sender && newTrack && sender.track !== newTrack) {
-          await sender.replaceTrack(newTrack);
-        }
-        try{
-          const state = wf.get(pid); if (!state) continue;
-          state.makingOffer = true;
-          const offer = await pc.createOffer({ iceRestart: true });
-          await pc.setLocalDescription(offer);
-          wsSendSignal(pid, { sdp: pc.localDescription });
-        }finally{
-          const st2 = wf.get(pid); if (st2) st2.makingOffer = false;
-        }
+        if (sender && newTrack && sender.track !== newTrack) { await sender.replaceTrack(newTrack); }
+        try{ const state = wf.get(pid); if (!state) continue; state.makingOffer = true; const offer = await pc.createOffer({ iceRestart: true }); await pc.setLocalDescription(offer); wsSendSignal(pid, { sdp: pc.localDescription }); }finally{ const st2 = wf.get(pid); if (st2) st2.makingOffer = false; }
       }
     }catch(e){}
   }
 
   // ---- UI ----
-  enterBtn.addEventListener('click', async ()=>{
-    myName=(nameInput.value||'').trim()||'Anon';
-    try{ await ensureLocalStream(); localMonitor.srcObject=localStream; setMic(true); }
-    catch(e){ loginStatus.textContent='No se pudo acceder al micrófono: '+e; return; }
-
-    loginCard.style.display='none'; roomCard.style.display='block';
-    joined=true; connectWS();
-  });
+  enterBtn.addEventListener('click', async ()=>{ myName=(nameInput.value||'').trim()||'Anon'; try{ await ensureLocalStream(); localMonitor.srcObject=localStream; setMic(true); await initTTS(); } catch(e){ loginStatus.textContent='No se pudo acceder al micrófono: '+e; return; } loginCard.style.display='none'; roomCard.style.display='block'; joined=true; connectWS(); });
   muteBtn.addEventListener('click', ()=>setMic(!micEnabled));
-  leaveBtn.addEventListener('click', async ()=>{
-    joined=false;
-    try{ ws && ws.close(); }catch(_){}
-    stopPing();
-    if (wsRetryTimer) { clearInterval(wsRetryTimer); wsRetryTimer=null; }
-    await disableWakeLock();
-    motoOverlay.style.display='none';
-    closeAll();
-    if(localStream) localStream.getTracks().forEach(t=>t.stop());
-    localStream=null; streams.clear(); pcMap.clear(); peerNames.clear();
-    roomCard.style.display='none'; loginCard.style.display='block';
-  });
+  leaveBtn.addEventListener('click', async ()=>{ joined=false; try{ ws && ws.close(); }catch(_){ } stopPing(); if (wsRetryTimer){ clearInterval(wsRetryTimer); wsRetryTimer=null; } await disableWakeLock(); motoOverlay.style.display='none'; closeAll(); if(localStream) localStream.getTracks().forEach(t=>t.stop()); localStream=null; streams.clear(); pcMap.clear(); peerNames.clear(); roomCard.style.display='none'; loginCard.style.display='block'; });
 
-  // ----- Modo Moto -----
-  motoBtn.addEventListener('click', async ()=>{
-    if (motoOverlay.style.display==='flex') {
-      await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF'; return;
-    }
-    await enableWakeLock(); motoOverlay.style.display='flex'; motoBtn.textContent='Modo Moto: ON';
-  });
-  overlayExit.addEventListener('click', async ()=>{
-    await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF';
-  });
+  motoBtn.addEventListener('click', async ()=>{ if (motoOverlay.style.display==='flex'){ await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF'; return; } await enableWakeLock(); motoOverlay.style.display='flex'; motoBtn.textContent='Modo Moto: ON'; try{ if (!ttsReady) await initTTS(); }catch(_){ } });
+  overlayExit.addEventListener('click', async ()=>{ await disableWakeLock(); motoOverlay.style.display='none'; motoBtn.textContent='Modo Moto: OFF'; });
   overlayMute.addEventListener('click', ()=>setMic(!micEnabled));
-
-  // Reintento al recuperar conectividad / foco
   window.addEventListener('online', ()=>{ if(joined && !wsConnected) connectWS(); });
-  document.addEventListener('visibilitychange', async ()=>{
-    if(document.visibilityState==='visible' && joined){
-      await refreshMicAndRenegotiate();
-      if (motoOverlay.style.display==='flex' && !wakeLock) await enableWakeLock();
-    }
-  });
-
+  document.addEventListener('visibilitychange', async ()=>{ if(document.visibilityState==='visible' && joined){ await refreshMicAndRenegotiate(); if (motoOverlay.style.display==='flex' && !wakeLock) await enableWakeLock(); } });
 })();
 </script>
+
+<script type="module" src="/js/native-mic.bootstrap.js"></script>
 </body>
 </html>
