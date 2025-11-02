@@ -86,6 +86,8 @@
   let pc = null;
   let localStream = null;
   let muted = false;
+  let makingOffer = false;
+  let ignoreOffer = false;
 
   const logLogin = (msg, cls='') => { loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; };
   const logCall  = (msg, cls='') => { callStatus.textContent  = msg; callStatus.className  = `status ${cls}`; };
@@ -147,17 +149,17 @@
   async function startCall(isCaller){
     const pc = createPC();
     const stream = await ensureLocalStream();
-
-    // Solo añadir tracks una vez
     const existing = pc.getSenders().map(s => s.track);
     stream.getAudioTracks().forEach(track => {
       if (!existing.includes(track)) pc.addTrack(track, stream);
     });
 
     if (isCaller) {
+      makingOffer = true;
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
       ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'offer', sdp:offer.sdp } } }));
+      makingOffer = false;
       logCall('📤 Oferta enviada');
     }
   }
@@ -167,9 +169,16 @@
     if (!remoteId) remoteId = fromId;
     const pc = createPC();
 
-    // SDP
     if (payload.sdp) {
       const { type, sdp } = payload.sdp;
+      const offerCollision = (type === 'offer') && (makingOffer || pc.signalingState !== 'stable');
+      if (offerCollision) {
+        console.warn('⚠️ Oferta simultánea detectada, se ignora');
+        ignoreOffer = true;
+        return;
+      }
+      ignoreOffer = false;
+
       if (type === 'offer') {
         await ensureLocalStream();
         const stream = localStream;
@@ -184,14 +193,18 @@
         logCall('📡 Respuesta enviada');
         return;
       }
+
       if (type === 'answer') {
+        if (pc.signalingState !== 'have-local-offer') {
+          console.warn('⚠️ Ignorando answer fuera de sincronización');
+          return;
+        }
         await pc.setRemoteDescription({ type:'answer', sdp });
         logCall('📥 Respuesta establecida');
         return;
       }
     }
 
-    // ICE
     if (payload.candidate && pc.remoteDescription) {
       try { await pc.addIceCandidate(payload.candidate); }
       catch(e){ console.warn('addIceCandidate error', e); }
