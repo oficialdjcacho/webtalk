@@ -32,7 +32,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 // --- Estructuras de datos ---
-// salas: Map<room, { key, clients: Map<clientId, { ws, name, isAlive }> }>
+// rooms: Map<roomName, { key, clients: Map<clientId, { ws, name, isAlive, muted }> }>
 const rooms = new Map();
 
 // --- Funciones de utilidad ---
@@ -57,7 +57,6 @@ function removeClient(roomName, clientId) {
   const room = rooms.get(roomName);
   if (!room) return;
   room.clients.delete(clientId);
-  // Si la sala queda vacía, se elimina
   if (room.clients.size === 0) rooms.delete(roomName);
 }
 
@@ -88,7 +87,6 @@ wss.on("connection", (ws) => {
       }
 
       const room = getOrCreateRoom(roomName, key);
-      // Verificar clave
       if (room.key !== key) {
         ws.send(JSON.stringify({ type: "auth-failed", reason: "Clave incorrecta" }));
         try { ws.close(); } catch {}
@@ -96,20 +94,37 @@ wss.on("connection", (ws) => {
       }
 
       // Añadir cliente
-      room.clients.set(clientId, { ws, name, isAlive: true });
+      room.clients.set(clientId, { ws, name, isAlive: true, muted: false });
       joined = true;
 
       // Peers actuales (sin mí)
       const peers = [];
       for (const [cid, info] of room.clients.entries()) {
-        if (cid !== clientId) peers.push({ clientId: cid, name: info.name });
+        if (cid !== clientId) peers.push({ clientId: cid, name: info.name, muted: info.muted });
       }
 
       // Notificar al nuevo
-      ws.send(JSON.stringify({ type: "joined", clientId, peers, room: roomName }));
+      ws.send(JSON.stringify({ 
+        type: "joined", 
+        clientId, 
+        peers, 
+        room: roomName 
+      }));
 
       // Avisar a los demás
-      broadcast(roomName, { type: "peer-joined", clientId, name }, clientId);
+      broadcast(roomName, { type: "peer-joined", clientId, name, muted: false }, clientId);
+      return;
+    }
+
+    // ---- MUTE-CHANGED ----
+    if (msg.type === "mute-changed") {
+      const room = rooms.get(roomName);
+      if (!room) return;
+      const info = room.clients.get(clientId);
+      if (info) {
+        info.muted = !!msg.muted;
+        broadcast(roomName, { type: "mute-changed", clientId, muted: info.muted }, clientId);
+      }
       return;
     }
 
