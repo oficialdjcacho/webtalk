@@ -8,12 +8,15 @@ const { v4: uuidv4 } = require("uuid");
 
 const PORT = process.env.PORT || 8080;
 
-// HTTP estático
+// --- Servidor HTTP estático ---
 const server = http.createServer((req, res) => {
   const urlPath = req.url === "/" ? "/index.html" : req.url;
   const filePath = path.join(__dirname, "public", urlPath.replace(/^\/+/, ""));
   fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); return res.end("Not found"); }
+    if (err) {
+      res.writeHead(404);
+      return res.end("Not found");
+    }
     const ext = path.extname(filePath).toLowerCase();
     const type =
       ext === ".html" ? "text/html" :
@@ -28,112 +31,147 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// Sala única
-// clients: Map<clientId, { ws, name, isAlive }>
-const clients = new Map();
-// byName: Map<name, clientId>
-const byName  = new Map();
+// --- Estructuras de datos ---
+// salas: Map<room, { key, clients: Map<clientId, { ws, name, isAlive }> }>
+const rooms = new Map();
 
-function broadcast(payload, excludeId = null) {
+// --- Funciones de utilidad ---
+function getOrCreateRoom(roomName, key) {
+  if (!rooms.has(roomName)) {
+    rooms.set(roomName, { key, clients: new Map() });
+  }
+  return rooms.get(roomName);
+}
+
+function broadcast(roomName, payload, excludeId = null) {
+  const room = rooms.get(roomName);
+  if (!room) return;
   const msg = JSON.stringify(payload);
-  for (const [cid, info] of clients.entries()) {
+  for (const [cid, info] of room.clients.entries()) {
     if (excludeId && cid === excludeId) continue;
     try { info.ws.send(msg); } catch {}
   }
 }
 
-function silentClose(clientId) {
-  const info = clients.get(clientId);
-  if (!info) return;
-  try { info.ws.close(); } catch {}
-  clients.delete(clientId);
-  if (byName.get(info.name) === clientId) byName.delete(info.name);
+function removeClient(roomName, clientId) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+  room.clients.delete(clientId);
+  // Si la sala queda vacía, se elimina
+  if (room.clients.size === 0) rooms.delete(roomName);
 }
 
-function leave(clientId, doBroadcast = true) {
-  const info = clients.get(clientId);
-  if (!info) return;
-  clients.delete(clientId);
-  if (byName.get(info.name) === clientId) byName.delete(info.name);
-  if (doBroadcast) broadcast({ type: "peer-left", clientId, name: info.name });
-}
-
+// --- WebSocket principal ---
 wss.on("connection", (ws) => {
   const clientId = uuidv4();
   let joined = false;
   let name = "Anónimo";
-  ws.isAlive = true;
+  let roomName = null;
 
+  ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
 
   ws.on("message", (buf) => {
     let msg = {};
     try { msg = JSON.parse(buf.toString()); } catch { return; }
 
+    // ---- JOIN ----
     if (msg.type === "join") {
       name = String(msg.name || "Anónimo").slice(0, 64);
+      roomName = String(msg.room || "").trim();
+      const key = String(msg.key || "").trim();
 
-      // Reemplazo por nombre: si existe otro con el mismo nombre, lo cerramos en silencio
-      const existingId = byName.get(name);
-      if (existingId && existingId !== clientId) {
-        silentClose(existingId); // sin peer-left para evitar ping-pong de eventos
+      if (!roomName || !key) {
+        ws.send(JSON.stringify({ type: "auth-failed", reason: "Sala o clave vacía" }));
+        ws.close();
+        return;
       }
 
-      clients.set(clientId, { ws, name, isAlive: true });
-      byName.set(name, clientId);
+      const room = getOrCreateRoom(roomName, key);
+      // Verificar clave
+      if (room.key !== key) {
+        ws.send(JSON.stringify({ type: "auth-failed", reason: "Clave incorrecta" }));
+        try { ws.close(); } catch {}
+        return;
+      }
+
+      // Añadir cliente
+      room.clients.set(clientId, { ws, name, isAlive: true });
       joined = true;
 
       // Peers actuales (sin mí)
       const peers = [];
-      for (const [cid, info] of clients.entries()) {
+      for (const [cid, info] of room.clients.entries()) {
         if (cid !== clientId) peers.push({ clientId: cid, name: info.name });
       }
-      ws.send(JSON.stringify({ type: "joined", clientId, peers }));
 
-      // Aviso a otros: sólo joined del nuevo
-      broadcast({ type: "peer-joined", clientId, name }, clientId);
+      // Notificar al nuevo
+      ws.send(JSON.stringify({ type: "joined", clientId, peers, room: roomName }));
+
+      // Avisar a los demás
+      broadcast(roomName, { type: "peer-joined", clientId, name }, clientId);
       return;
     }
 
+    // ---- SIGNAL ----
     if (msg.type === "signal") {
+      if (!roomName) return;
       const { targetId, payload } = msg;
-      const target = clients.get(targetId);
+      const room = rooms.get(roomName);
+      if (!room) return;
+      const target = room.clients.get(targetId);
       if (target) {
         target.ws.send(JSON.stringify({ type: "signal", fromId: clientId, payload }));
       }
       return;
     }
 
-    if (msg.type === "ice-restart") {
-      broadcast({ type: "ice-restart", fromId: clientId }, clientId);
-      return;
-    }
-
+    // ---- PING ----
     if (msg.type === "ping") {
       ws.send(JSON.stringify({ type: "pong" }));
       return;
     }
   });
 
-  ws.on("close", () => { if (joined) leave(clientId, true); });
-  ws.on("error", () => { if (joined) leave(clientId, true); });
+  ws.on("close", () => {
+    if (joined && roomName) {
+      const room = rooms.get(roomName);
+      if (room) {
+        removeClient(roomName, clientId);
+        broadcast(roomName, { type: "peer-left", clientId, name });
+      }
+    }
+  });
+
+  ws.on("error", () => {
+    if (joined && roomName) {
+      const room = rooms.get(roomName);
+      if (room) {
+        removeClient(roomName, clientId);
+        broadcast(roomName, { type: "peer-left", clientId, name });
+      }
+    }
+  });
 });
 
-// Heartbeat: limpia zombis sin duplicar eventos
+// --- Limpieza automática ---
 setInterval(() => {
-  for (const [cid, info] of clients.entries()) {
-    const ws = info.ws;
-    if (ws.isAlive === false) {
-      try { ws.terminate(); } catch {}
-      // Al terminar por heartbeat, emite un solo peer-left
-      leave(cid, true);
-      continue;
+  for (const [roomName, room] of rooms.entries()) {
+    for (const [cid, info] of room.clients.entries()) {
+      const ws = info.ws;
+      if (ws.isAlive === false) {
+        try { ws.terminate(); } catch {}
+        room.clients.delete(cid);
+        broadcast(roomName, { type: "peer-left", clientId: cid, name: info.name });
+      } else {
+        ws.isAlive = false;
+        try { ws.ping(); } catch {}
+      }
     }
-    ws.isAlive = false;
-    try { ws.ping(); } catch {}
+    if (room.clients.size === 0) rooms.delete(roomName);
   }
 }, 15000);
 
 server.listen(PORT, () => {
-  console.log(`HTTP+WS en http://0.0.0.0:${PORT}`);
+  console.log(`HTTP+WS activo en http://0.0.0.0:${PORT}`);
 });
