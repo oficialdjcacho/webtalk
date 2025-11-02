@@ -29,25 +29,24 @@
   <!-- LOGIN -->
   <div class="card" id="loginCard">
     <h2>WebTalk</h2>
-    <p>Introduce <b>nombre</b>, <b>sala</b> y <b>clave</b> y pulsa <b>Entrar</b>. Todos los usuarios con la misma
-      sala+clave se comunican entre sí; no existe la sala global.</p>
+    <p>Introduce <b>nombre</b>, <b>sala</b> y <b>clave</b>. Todos los usuarios con la misma sala y clave se comunican entre sí.</p>
     <div class="row">
-      <input id="nameInput" placeholder="Tu nombre" maxlength="64" autocomplete="nickname"/>
+      <input id="nameInput" placeholder="Tu nombre" maxlength="64"/>
     </div>
     <div class="row">
-      <input id="roomInput" placeholder="Nombre de la sala" maxlength="64" autocomplete="off"/>
-      <input id="keyInput" placeholder="Clave de la sala" maxlength="64" type="password" autocomplete="off"/>
+      <input id="roomInput" placeholder="Nombre de la sala" maxlength="64"/>
+      <input id="keyInput" placeholder="Clave" maxlength="64" type="password"/>
       <button id="enterBtn">Entrar</button>
     </div>
     <div class="row">
-      <label class="pill"><input type="checkbox" id="turnOnlyChk"> Usar TURN sólo (depuración NAT)</label>
+      <label class="pill"><input type="checkbox" id="turnOnlyChk"> Usar TURN sólo</label>
     </div>
     <div class="status" id="loginStatus"></div>
   </div>
 
   <!-- SALA -->
   <div class="card hidden" id="roomCard">
-    <h3><span id="roomTitle">Sala</span> <span class="dim">(mic siempre abierto)</span></h3>
+    <h3><span id="roomTitle"></span> <span class="dim">(mic siempre abierto)</span></h3>
     <div class="controls">
       <button id="leaveBtn">Salir</button>
       <button id="muteBtn">Silenciar mic</button>
@@ -64,192 +63,81 @@
 </div>
 
 <script>
-(function(){
-  // ---------- Utilidad ----------
-  const $ = (sel) => document.querySelector(sel);
-  const logLogin = (msg, cls='') => { loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; };
-  const logCall  = (msg, cls='') => { callStatus.textContent  = msg; callStatus.className  = `status ${cls}`; };
+(() => {
+  const $ = s => document.querySelector(s);
 
-  // ---------- Elementos ----------
-  const loginCard    = $('#loginCard');
-  const roomCard     = $('#roomCard');
-  const nameInput    = $('#nameInput');
-  const roomInput    = $('#roomInput');
-  const keyInput     = $('#keyInput');
-  const enterBtn     = $('#enterBtn');
-  const leaveBtn     = $('#leaveBtn');
-  const muteBtn      = $('#muteBtn');
-  const turnOnlyChk  = $('#turnOnlyChk');
-  const roomTitle    = $('#roomTitle');
-  const loginStatus  = $('#loginStatus');
-  const callStatus   = $('#callStatus');
-  const pcStateEl    = $('#pcState');
-  const iceStateEl   = $('#iceState');
-  const remoteAudio  = $('#remoteAudio');
+  const loginCard = $('#loginCard');
+  const roomCard = $('#roomCard');
+  const nameInput = $('#nameInput');
+  const roomInput = $('#roomInput');
+  const keyInput = $('#keyInput');
+  const enterBtn = $('#enterBtn');
+  const leaveBtn = $('#leaveBtn');
+  const muteBtn = $('#muteBtn');
+  const turnOnlyChk = $('#turnOnlyChk');
+  const roomTitle = $('#roomTitle');
+  const loginStatus = $('#loginStatus');
+  const callStatus = $('#callStatus');
+  const pcStateEl = $('#pcState');
+  const iceStateEl = $('#iceState');
+  const remoteAudio = $('#remoteAudio');
 
-  // ---------- Estado ----------
-  let ws = null;
-  let myId = null;
-  let remoteId = null;
-  let myName = '';
-  let myRoom = '';
-  let myKey  = '';
+  let ws, myId, remoteId, myName, myRoom, myKey;
   let pc = null;
   let localStream = null;
   let muted = false;
 
-  // ---------- ICE servers ----------
-  function buildIceServers(turnOnly=false){
-    const base = [
-      { urls: 'stun:stun.l.google.com:19302' }
-    ];
-    const ours = [
-      { urls: 'turn:cachofotos.ddns.net:3478?transport=udp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
-      { urls: 'turn:cachofotos.ddns.net:3478?transport=tcp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
-      { urls: 'turns:cachofotos.ddns.net:5349',               username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' }
-    ];
-    return turnOnly ? ours : [...base, ...ours];
-  }
+  const logLogin = (msg, cls='') => { loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; };
+  const logCall  = (msg, cls='') => { callStatus.textContent  = msg; callStatus.className  = `status ${cls}`; };
 
-  // ---------- UI helpers ----------
-  function showRoomUI(on){
+  function showRoomUI(on) {
     loginCard.classList.toggle('hidden', on);
     roomCard.classList.toggle('hidden', !on);
   }
 
-  function updatePCState(){
-    if (!pc) { pcStateEl.textContent = 'PC: CLOSED'; return; }
-    pcStateEl.textContent = 'PC: ' + pc.connectionState.toUpperCase();
-    iceStateEl.textContent = 'ICE: ' + pc.iceConnectionState.toUpperCase();
+  function updatePCState() {
+    if (!pc) { pcStateEl.textContent = 'PC: CLOSED'; iceStateEl.textContent = 'ICE: CLOSED'; return; }
+    pcStateEl.textContent = `PC: ${pc.connectionState}`;
+    iceStateEl.textContent = `ICE: ${pc.iceConnectionState}`;
   }
 
-  function setMicMuted(m){
-    muted = m;
-    if (localStream){
-      localStream.getAudioTracks().forEach(t => t.enabled = !m);
-    }
-    muteBtn.textContent = m ? 'Activar mic' : 'Silenciar mic';
+  function buildIceServers(turnOnly=false){
+    const ours = [
+      { urls: 'turn:cachofotos.ddns.net:3478?transport=udp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
+      { urls: 'turn:cachofotos.ddns.net:3478?transport=tcp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
+      { urls: 'turns:cachofotos.ddns.net:5349', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' }
+    ];
+    const stun = [{ urls: 'stun:stun.l.google.com:19302' }];
+    return turnOnly ? ours : [...stun, ...ours];
   }
 
-  // ---------- WebSocket ----------
-  function connectWS(){
-    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)){
-      try { ws.close(); } catch(e){}
-    }
-    // auto: usar mismo host con wss si la página está en https. Si sirves estático detrás de tu dominio, esto seguirá funcionando.
-    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-    ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      logLogin('Conectado a señalización. Autenticando…');
-      const msg = { type: 'join', name: myName, room: myRoom, key: myKey };
-      ws.send(JSON.stringify(msg));
-    };
-
-    ws.onclose = () => {
-      logCall('Señalización desconectada.', 'err');
-    };
-
-    ws.onerror = (ev) => {
-      logLogin('Error de WebSocket.', 'err');
-      console.error('WS error', ev);
-    };
-
-    ws.onmessage = (ev) => {
-      let data;
-      try{ data = JSON.parse(ev.data); } catch(e){ console.warn('WS parse', e); return; }
-
-      switch(data.type){
-        case 'auth-failed':
-          // el server responde con {type:'auth-failed', reason:'...'}
-          logLogin(`Clave incorrecta para sala "${myRoom}".`, 'err');
-          try { ws.close(); } catch(e){}
-          teardownPC(true);
-          showRoomUI(false);
-          break;
-
-        case 'joined':
-          // {type:'joined', clientId, peers:[{clientId,name}], room}
-          myId = data.clientId;
-          logLogin(`Acceso concedido a sala "${data.room}".`, 'ok');
-          roomTitle.textContent = `Sala: ${data.room}`;
-          showRoomUI(true);
-          // Si ya hay alguien, elegimos el primero y ofrecemos
-          if (Array.isArray(data.peers) && data.peers.length > 0){
-            remoteId = data.peers[0].clientId;
-            startCall(/*isCaller*/true);
-          } else {
-            logCall('Sala vacía. Esperando a otro usuario…');
-          }
-          break;
-
-        case 'peer-joined':
-          // {type:'peer-joined', clientId, name}
-          if (!remoteId){
-            remoteId = data.clientId;
-            startCall(true);
-          } else {
-            logCall(`Otro peer se unió (${data.clientId}), ya estamos conectados con uno.`);
-          }
-          break;
-
-        case 'peer-left':
-          if (remoteId && data.clientId === remoteId){
-            logCall('El peer remoto salió. Conexión cerrada.');
-            remoteId = null;
-            teardownPC(false);
-          }
-          break;
-
-        case 'signal':
-          handleSignalFromPeer(data);
-          break;
-      }
-    };
-  }
-
-  function sendToPeer(payload){
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (!remoteId) return;
-    ws.send(JSON.stringify({ type: 'signal', targetId: remoteId, payload }));
-  }
-
-  // ---------- WebRTC ----------
-  async function ensureLocalStream(){
-    if (localStream) return localStream;
-    // iOS/Android requieren interacción previa del usuario (el botón Entrar ya lo cumple)
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+  async function ensureLocalStream() {
+    if (localStream && localStream.getTracks().length) return localStream;
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     return localStream;
   }
 
-  function createPC(){
+  function setMicMuted(m) {
+    muted = m;
+    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !m);
+    muteBtn.textContent = m ? 'Activar mic' : 'Silenciar mic';
+  }
+
+  function createPC() {
     if (pc) return pc;
     pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
 
     pc.onconnectionstatechange = updatePCState;
     pc.oniceconnectionstatechange = updatePCState;
 
-    pc.onicecandidate = (ev) => {
-      if (ev.candidate){
-        sendToPeer({ candidate: {
-          candidate: ev.candidate.candidate,
-          sdpMid: ev.candidate.sdpMid,
-          sdpMLineIndex: ev.candidate.sdpMLineIndex
-        }});
-      }
+    pc.onicecandidate = ev => {
+      if (ev.candidate && ws && remoteId)
+        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ candidate: ev.candidate } }));
     };
 
-    pc.ontrack = (ev) => {
-      // Sólo audio
-      if (ev.streams && ev.streams[0]) {
-        remoteAudio.srcObject = ev.streams[0];
-      } else {
-        // Fallback: construir stream manual a partir de tracks
-        const ms = new MediaStream();
-        ms.addTrack(ev.track);
-        remoteAudio.srcObject = ms;
-      }
-      logCall('🔊 Audio remoto recibido.');
+    pc.ontrack = ev => {
+      remoteAudio.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+      logCall('🔊 Audio remoto recibido');
     };
 
     updatePCState();
@@ -257,106 +145,155 @@
   }
 
   async function startCall(isCaller){
-    await ensureLocalStream();
     const pc = createPC();
-    // Añadimos track local
-    localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
+    const stream = await ensureLocalStream();
 
-    if (isCaller){
+    // Solo añadir tracks una vez
+    const existing = pc.getSenders().map(s => s.track);
+    stream.getAudioTracks().forEach(track => {
+      if (!existing.includes(track)) pc.addTrack(track, stream);
+    });
+
+    if (isCaller) {
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
-      sendToPeer({ sdp: { type: 'offer', sdp: offer.sdp }});
-      logCall('📤 Oferta enviada.');
-    } else {
-      logCall('Esperando oferta del remoto…');
+      ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'offer', sdp:offer.sdp } } }));
+      logCall('📤 Oferta enviada');
     }
   }
 
-  async function handleSignalFromPeer(msg){
+  async function handleSignal(msg) {
     const { fromId, payload } = msg;
-    if (!remoteId) remoteId = fromId || remoteId;
-
+    if (!remoteId) remoteId = fromId;
     const pc = createPC();
 
     // SDP
-    if (payload && payload.sdp){
+    if (payload.sdp) {
       const { type, sdp } = payload.sdp;
-      if (type === 'offer'){
+      if (type === 'offer') {
         await ensureLocalStream();
-        localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
-        await pc.setRemoteDescription({ type: 'offer', sdp });
+        const stream = localStream;
+        const existing = pc.getSenders().map(s => s.track);
+        stream.getAudioTracks().forEach(track => {
+          if (!existing.includes(track)) pc.addTrack(track, stream);
+        });
+        await pc.setRemoteDescription({ type:'offer', sdp });
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        sendToPeer({ sdp: { type: 'answer', sdp: answer.sdp }});
-        logCall('📡 Respuesta enviada.');
+        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
+        logCall('📡 Respuesta enviada');
         return;
       }
-      if (type === 'answer'){
-        await pc.setRemoteDescription({ type: 'answer', sdp });
-        logCall('📥 Respuesta establecida.');
+      if (type === 'answer') {
+        await pc.setRemoteDescription({ type:'answer', sdp });
+        logCall('📥 Respuesta establecida');
         return;
       }
     }
 
     // ICE
-    if (payload && payload.candidate){
-      const c = payload.candidate;
-      try{
-        await pc.addIceCandidate(new RTCIceCandidate(c));
-      }catch(e){
-        console.error('Error addIceCandidate', e);
-      }
+    if (payload.candidate && pc.remoteDescription) {
+      try { await pc.addIceCandidate(payload.candidate); }
+      catch(e){ console.warn('addIceCandidate error', e); }
     }
   }
 
-  function teardownPC(resetStream){
-    if (pc){
-      try { pc.getSenders().forEach(s => { try{ pc.removeTrack(s);}catch(_){}});} catch(_){}
-      try { pc.close(); } catch(_){}
+  function teardownPC(stopTracks){
+    if (pc) {
+      try { pc.close(); } catch {}
     }
     pc = null;
-    updatePCState();
-
-    if (resetStream && localStream){
-      try { localStream.getTracks().forEach(t => t.stop()); } catch(_){}
+    if (stopTracks && localStream) {
+      localStream.getTracks().forEach(t => t.stop());
       localStream = null;
     }
     remoteAudio.srcObject = null;
+    updatePCState();
   }
 
-  // ---------- Eventos UI ----------
-  enterBtn.addEventListener('click', async () => {
-    myName = (nameInput.value || '').trim();
-    myRoom = (roomInput.value || '').trim();
-    myKey  = (keyInput.value  || '').trim();
+  function connectWS(){
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    ws = new WebSocket(wsUrl);
 
-    if (!myName){ logLogin('Introduce tu nombre.', 'err'); nameInput.focus(); return; }
-    if (!myRoom){ logLogin('Introduce el nombre de la sala.', 'err'); roomInput.focus(); return; }
-    if (!myKey){  logLogin('Introduce la clave de la sala.', 'err'); keyInput.focus(); return; }
+    ws.onopen = () => {
+      logLogin('Conectado. Enviando datos…');
+      ws.send(JSON.stringify({ type:'join', name:myName, room:myRoom, key:myKey }));
+    };
 
-    logLogin('Solicitando permisos de micrófono…');
-    try{
+    ws.onmessage = async ev => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+
+      switch(msg.type){
+        case 'auth-failed':
+          logLogin(`Clave incorrecta para sala "${myRoom}"`, 'err');
+          try { ws.close(); } catch {}
+          teardownPC(true);
+          showRoomUI(false);
+          break;
+        case 'joined':
+          myId = msg.clientId;
+          roomTitle.textContent = `Sala: ${msg.room}`;
+          showRoomUI(true);
+          logLogin(`Unido a sala "${msg.room}"`, 'ok');
+          if (Array.isArray(msg.peers) && msg.peers.length) {
+            remoteId = msg.peers[0].clientId;
+            startCall(true);
+          } else {
+            logCall('Sala vacía. Esperando otro usuario…');
+          }
+          break;
+        case 'peer-joined':
+          if (!remoteId) {
+            remoteId = msg.clientId;
+            startCall(true);
+          } else {
+            logCall(`Nuevo peer: ${msg.clientId}`);
+          }
+          break;
+        case 'peer-left':
+          if (msg.clientId === remoteId) {
+            logCall('El peer remoto salió');
+            remoteId = null;
+            teardownPC(false);
+          }
+          break;
+        case 'signal':
+          await handleSignal(msg);
+          break;
+      }
+    };
+
+    ws.onclose = () => logCall('Conexión WS cerrada','err');
+    ws.onerror = () => logLogin('Error WS','err');
+  }
+
+  // ---- Eventos UI ----
+  enterBtn.onclick = async () => {
+    myName = nameInput.value.trim();
+    myRoom = roomInput.value.trim();
+    myKey = keyInput.value.trim();
+    if (!myName || !myRoom || !myKey) {
+      logLogin('Completa todos los campos','err'); return;
+    }
+    try {
       await ensureLocalStream();
       setMicMuted(false);
-      logLogin('Permisos concedidos. Conectando…');
       connectWS();
-    }catch(e){
-      console.error(e);
-      logLogin('No se pudo acceder al micrófono.', 'err');
+    } catch {
+      logLogin('No se pudo acceder al micrófono','err');
     }
-  });
+  };
 
-  leaveBtn.addEventListener('click', () => {
-    try{ ws && ws.close(); }catch(_){}
+  leaveBtn.onclick = () => {
+    try { ws && ws.close(); } catch {}
     remoteId = null;
     teardownPC(true);
     showRoomUI(false);
-    logLogin('Has salido de la sala.');
-  });
+  };
 
-  muteBtn.addEventListener('click', () => setMicMuted(!muted));
+  muteBtn.onclick = () => setMicMuted(!muted);
 
-  // --------- Inicio ----------
   showRoomUI(false);
   updatePCState();
 })();
