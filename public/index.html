@@ -70,14 +70,14 @@
   const roomCard = $('#roomCard');
   const nameInput = $('#nameInput');
   const roomInput = $('#roomInput');
-  const keyInput = $('#keyInput');
-  const enterBtn = $('#enterBtn');
-  const leaveBtn = $('#leaveBtn');
-  const muteBtn = $('#muteBtn');
+  const keyInput   = $('#keyInput');
+  const enterBtn  = $('#enterBtn');
+  const leaveBtn  = $('#leaveBtn');
+  const muteBtn   = $('#muteBtn');
   const turnOnlyChk = $('#turnOnlyChk');
   const roomTitle = $('#roomTitle');
   const loginStatus = $('#loginStatus');
-  const callStatus = $('#callStatus');
+  const callStatus  = $('#callStatus');
   const pcStateEl = $('#pcState');
   const iceStateEl = $('#iceState');
   const remoteAudio = $('#remoteAudio');
@@ -86,11 +86,26 @@
   let pc = null;
   let localStream = null;
   let muted = false;
+
+  // Perfect Negotiation
   let makingOffer = false;
   let ignoreOffer = false;
+  let polite = false; // se decide al fijar remoteId
+  
+  // Cola de ICE hasta tener remoteDescription
+  const pendingCandidates = [];
 
-  const logLogin = (msg, cls='') => { loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; };
-  const logCall  = (msg, cls='') => { callStatus.textContent  = msg; callStatus.className  = `status ${cls}`; };
+  // LOG helpers
+  const L = {
+    login: (msg, cls='') => { console.log('[LOGIN]', msg); loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; },
+    call:  (msg, cls='') => { console.log('[CALL]', msg);  callStatus.textContent  = msg;  callStatus.className  = `status ${cls}`; },
+    ws:    (...a) => console.log('[WS]', ...a),
+    rtc:   (...a) => console.log('[RTC]', ...a),
+    ice:   (...a) => console.log('[ICE]', ...a),
+    err:   (...a) => console.error('[ERR]', ...a),
+    warn:  (...a) => console.warn('[WARN]', ...a),
+    dbg:   (...a) => console.debug('[DBG]', ...a),
+  };
 
   function showRoomUI(on) {
     loginCard.classList.toggle('hidden', on);
@@ -101,6 +116,7 @@
     if (!pc) { pcStateEl.textContent = 'PC: CLOSED'; iceStateEl.textContent = 'ICE: CLOSED'; return; }
     pcStateEl.textContent = `PC: ${pc.connectionState}`;
     iceStateEl.textContent = `ICE: ${pc.iceConnectionState}`;
+    L.rtc('PC state:', pc.connectionState, 'ICE state:', pc.iceConnectionState, 'signaling:', pc.signalingState);
   }
 
   function buildIceServers(turnOnly=false){
@@ -110,12 +126,16 @@
       { urls: 'turns:cachofotos.ddns.net:5349', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' }
     ];
     const stun = [{ urls: 'stun:stun.l.google.com:19302' }];
-    return turnOnly ? ours : [...stun, ...ours];
+    const res = turnOnly ? ours : [...stun, ...ours];
+    L.dbg('ICE servers:', res);
+    return res;
   }
 
   async function ensureLocalStream() {
     if (localStream && localStream.getTracks().length) return localStream;
+    L.dbg('Solicitando getUserMedia…');
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    L.dbg('getUserMedia OK. Tracks:', localStream.getTracks().map(t => t.kind));
     return localStream;
   }
 
@@ -123,113 +143,212 @@
     muted = m;
     if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !m);
     muteBtn.textContent = m ? 'Activar mic' : 'Silenciar mic';
+    L.call(m ? 'Mic desactivado' : 'Mic activado');
+  }
+
+  function decidePoliteRole() {
+    if (!myId || !remoteId) return;
+    // Regla determinista: el menor lexicográficamente es "polite"
+    polite = String(myId).localeCompare(String(remoteId)) < 0;
+    L.dbg('Roles:', { myId, remoteId, polite });
   }
 
   function createPC() {
     if (pc) return pc;
+    L.dbg('Creando RTCPeerConnection…');
     pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
 
-    pc.onconnectionstatechange = updatePCState;
+    pc.onconnectionstatechange = () => {
+      updatePCState();
+      if (pc.connectionState === 'failed') L.warn('PC failed');
+    };
     pc.oniceconnectionstatechange = updatePCState;
 
     pc.onicecandidate = ev => {
-      if (ev.candidate && ws && remoteId)
+      if (ev.candidate && ws && remoteId) {
+        L.ice('Enviando candidate:', ev.candidate);
         ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ candidate: ev.candidate } }));
+      }
     };
 
     pc.ontrack = ev => {
-      remoteAudio.srcObject = ev.streams[0] || new MediaStream([ev.track]);
-      logCall('🔊 Audio remoto recibido');
+      const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+      remoteAudio.srcObject = stream;
+      L.call('🔊 Audio remoto recibido');
+    };
+
+    pc.onsignalingstatechange = () => {
+      L.dbg('Signaling state:', pc.signalingState);
     };
 
     updatePCState();
     return pc;
   }
 
-  async function startCall(isCaller){
-    const pc = createPC();
-    const stream = await ensureLocalStream();
-    const existing = pc.getSenders().map(s => s.track);
-    stream.getAudioTracks().forEach(track => {
-      if (!existing.includes(track)) pc.addTrack(track, stream);
+  function ensureTrackAdded(pc) {
+    if (!localStream) return;
+    const existingTracks = pc.getSenders().map(s => s.track).filter(Boolean);
+    localStream.getAudioTracks().forEach(track => {
+      if (!existingTracks.includes(track)) {
+        L.dbg('Añadiendo track local…');
+        pc.addTrack(track, localStream);
+      } else {
+        L.dbg('Track local ya añadido, se omite.');
+      }
     });
+  }
 
-    if (isCaller) {
-      makingOffer = true;
-      const offer = await pc.createOffer({ offerToReceiveAudio: true });
-      await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'offer', sdp:offer.sdp } } }));
-      makingOffer = false;
-      logCall('📤 Oferta enviada');
+  async function startCallIfCaller() {
+    // El lado impolite inicia; el polite espera
+    if (!polite && remoteId) {
+      const pc = createPC();
+      ensureTrackAdded(pc);
+      try {
+        makingOffer = true;
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        L.rtc('📤 Oferta enviada');
+        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'offer', sdp:offer.sdp } } }));
+      } catch (e) {
+        L.err('Error creando/enviando offer:', e);
+      } finally {
+        makingOffer = false;
+      }
+    } else {
+      L.dbg('Soy polite o no hay remoteId: no inicio llamada');
+    }
+  }
+
+  async function applyPendingCandidates() {
+    if (!pc || !pc.remoteDescription) return;
+    if (!pendingCandidates.length) return;
+    L.ice(`Aplicando ${pendingCandidates.length} ICE candidates en cola…`);
+    while (pendingCandidates.length) {
+      const c = pendingCandidates.shift();
+      try {
+        await pc.addIceCandidate(c);
+      } catch (e) {
+        L.warn('addIceCandidate fallo (cola):', e);
+      }
     }
   }
 
   async function handleSignal(msg) {
     const { fromId, payload } = msg;
-    if (!remoteId) remoteId = fromId;
+    if (!remoteId) {
+      remoteId = fromId;
+      decidePoliteRole();
+    }
     const pc = createPC();
 
     if (payload.sdp) {
       const { type, sdp } = payload.sdp;
-      const offerCollision = (type === 'offer') && (makingOffer || pc.signalingState !== 'stable');
+      L.ws('SDP recibido:', type, ' estado actual:', pc.signalingState, 'makingOffer:', makingOffer, 'polite:', polite);
+
+      const isOffer = type === 'offer';
+      const offerCollision = isOffer && (makingOffer || pc.signalingState !== 'stable');
+
       if (offerCollision) {
-        console.warn('⚠️ Oferta simultánea detectada, se ignora');
-        ignoreOffer = true;
+        if (!polite) {
+          L.warn('⚠️ Oferta simultánea detectada. Soy impolite → ignoro.');
+          return; // impolite ignora glare
+        }
+        // polite hace rollback y acepta la oferta
+        L.warn('⚠️ Oferta simultánea detectada. Soy polite → rollback y acepto oferta.');
+        try {
+          await Promise.allSettled([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription({ type: 'offer', sdp })
+          ]);
+        } catch (e) {
+          L.err('Fallo en rollback/remoteDescription:', e);
+          return;
+        }
+        try {
+          ensureTrackAdded(pc);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
+          L.rtc('📡 Respuesta enviada (tras rollback)');
+          await applyPendingCandidates();
+        } catch (e) {
+          L.err('Error creando/enviando answer (tras rollback):', e);
+        }
         return;
       }
-      ignoreOffer = false;
 
-      if (type === 'offer') {
-        await ensureLocalStream();
-        const stream = localStream;
-        const existing = pc.getSenders().map(s => s.track);
-        stream.getAudioTracks().forEach(track => {
-          if (!existing.includes(track)) pc.addTrack(track, stream);
-        });
-        await pc.setRemoteDescription({ type:'offer', sdp });
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
-        logCall('📡 Respuesta enviada');
+      if (isOffer) {
+        try {
+          await pc.setRemoteDescription({ type:'offer', sdp });
+          L.rtc('📥 Oferta establecida');
+          ensureTrackAdded(pc);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
+          L.rtc('📡 Respuesta enviada');
+          await applyPendingCandidates();
+        } catch (e) {
+          L.err('Error manejando offer:', e);
+        }
         return;
       }
 
       if (type === 'answer') {
         if (pc.signalingState !== 'have-local-offer') {
-          console.warn('⚠️ Ignorando answer fuera de sincronización');
+          L.warn('⚠️ Answer fuera de sincronización. signaling=', pc.signalingState);
           return;
         }
-        await pc.setRemoteDescription({ type:'answer', sdp });
-        logCall('📥 Respuesta establecida');
+        try {
+          await pc.setRemoteDescription({ type:'answer', sdp });
+          L.rtc('📥 Respuesta establecida');
+          await applyPendingCandidates();
+        } catch (e) {
+          L.err('Error fijando answer:', e);
+        }
         return;
       }
     }
 
-    if (payload.candidate && pc.remoteDescription) {
-      try { await pc.addIceCandidate(payload.candidate); }
-      catch(e){ console.warn('addIceCandidate error', e); }
+    if (payload.candidate) {
+      if (!pc.remoteDescription) {
+        L.ice('ICE recibido sin remoteDescription aún → en cola.');
+        pendingCandidates.push(payload.candidate);
+      } else {
+        try {
+          await pc.addIceCandidate(payload.candidate);
+          L.ice('ICE añadido inmediatamente');
+        } catch (e) {
+          L.warn('addIceCandidate error (inmediato):', e);
+        }
+      }
     }
   }
 
   function teardownPC(stopTracks){
     if (pc) {
+      try { pc.ontrack = null; pc.onicecandidate = null; pc.onconnectionstatechange = null; pc.oniceconnectionstatechange = null; } catch {}
       try { pc.close(); } catch {}
     }
     pc = null;
+    pendingCandidates.length = 0;
     if (stopTracks && localStream) {
       localStream.getTracks().forEach(t => t.stop());
       localStream = null;
     }
     remoteAudio.srcObject = null;
+    makingOffer = false;
+    ignoreOffer = false;
+    polite = false;
     updatePCState();
   }
 
   function connectWS(){
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    L.ws('Conectando WS a', wsUrl);
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      logLogin('Conectado. Enviando datos…');
+      L.ws('Abierto. Enviando join…');
       ws.send(JSON.stringify({ type:'join', name:myName, room:myRoom, key:myKey }));
     };
 
@@ -239,7 +358,8 @@
 
       switch(msg.type){
         case 'auth-failed':
-          logLogin(`Clave incorrecta para sala "${myRoom}"`, 'err');
+          L.ws('Auth failed');
+          L.login(`Clave incorrecta para sala "${myRoom}"`, 'err');
           try { ws.close(); } catch {}
           teardownPC(true);
           showRoomUI(false);
@@ -248,25 +368,33 @@
           myId = msg.clientId;
           roomTitle.textContent = `Sala: ${msg.room}`;
           showRoomUI(true);
-          logLogin(`Unido a sala "${msg.room}"`, 'ok');
+          L.login(`Unido a sala "${msg.room}"`, 'ok');
           if (Array.isArray(msg.peers) && msg.peers.length) {
             remoteId = msg.peers[0].clientId;
-            startCall(true);
+            decidePoliteRole();
+            await ensureLocalStream();
+            setMicMuted(false);
+            startCallIfCaller();
           } else {
-            logCall('Sala vacía. Esperando otro usuario…');
+            L.call('Sala vacía. Esperando otro usuario…');
           }
           break;
         case 'peer-joined':
+          L.ws('peer-joined', msg);
           if (!remoteId) {
             remoteId = msg.clientId;
-            startCall(true);
+            decidePoliteRole();
+            await ensureLocalStream();
+            setMicMuted(false);
+            startCallIfCaller();
           } else {
-            logCall(`Nuevo peer: ${msg.clientId}`);
+            L.call(`Nuevo peer: ${msg.clientId}`);
           }
           break;
         case 'peer-left':
+          L.ws('peer-left', msg);
           if (msg.clientId === remoteId) {
-            logCall('El peer remoto salió');
+            L.call('El peer remoto salió');
             remoteId = null;
             teardownPC(false);
           }
@@ -274,27 +402,30 @@
         case 'signal':
           await handleSignal(msg);
           break;
+        default:
+          L.ws('Mensaje no manejado:', msg);
       }
     };
 
-    ws.onclose = () => logCall('Conexión WS cerrada','err');
-    ws.onerror = () => logLogin('Error WS','err');
+    ws.onclose = () => L.call('Conexión WS cerrada','err');
+    ws.onerror = (e) => L.err('WS error', e);
   }
 
   // ---- Eventos UI ----
   enterBtn.onclick = async () => {
     myName = nameInput.value.trim();
     myRoom = roomInput.value.trim();
-    myKey = keyInput.value.trim();
+    myKey  = keyInput.value.trim();
     if (!myName || !myRoom || !myKey) {
-      logLogin('Completa todos los campos','err'); return;
+      L.login('Completa todos los campos','err'); return;
     }
     try {
-      await ensureLocalStream();
+      await ensureLocalStream(); // pedimos permiso ya
       setMicMuted(false);
       connectWS();
-    } catch {
-      logLogin('No se pudo acceder al micrófono','err');
+    } catch (e) {
+      L.login('No se pudo acceder al micrófono','err');
+      L.err(e);
     }
   };
 
