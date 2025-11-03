@@ -276,15 +276,31 @@
       const isOffer = type === 'offer';
       const offerCollision = isOffer && (sess.makingOffer || pc.signalingState !== 'stable');
 
+      // =========================
+      // CAMBIO MÍNIMO A PARTIR DE AQUÍ
+      // =========================
       if (offerCollision) {
         if (!sess.polite) {
-          L.rtc(`⚠️ Colisión de oferta con ${fromId}: impolite → ignoro`);
+          // ANTES: ignorábamos la oferta → esto dejaba la sesión “muerta” si había colisión
+          // AHORA: rehacemos nuestra PC y originamos una nueva oferta para sincronizar
+          L.rtc(`⚠️ Colisión de oferta con ${fromId}: impolite → rehago conexión`);
+          dropPeer(fromId);
+          const repaired = ensurePeer(fromId, users[fromId]?.name || 'Usuario');
+          // Garantizar que la pista local vuelve a estar añadida
+          if (localStream) {
+            const have = repaired.pc.getSenders().map(s => s.track);
+            localStream.getAudioTracks().forEach(t => { if (!have.includes(t)) repaired.pc.addTrack(t, localStream); });
+          }
+          await maybeCall(fromId);
           return;
         }
         try {
           await pc.setLocalDescription({ type: 'rollback' });
         } catch {}
       }
+      // =========================
+      // FIN DEL CAMBIO
+      // =========================
 
       if (isOffer) {
         await pc.setRemoteDescription({ type:'offer', sdp });
