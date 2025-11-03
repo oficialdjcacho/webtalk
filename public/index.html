@@ -22,7 +22,7 @@
     .pill { padding: 6px 10px; border-radius: 999px; border: 1px dashed #8886; font-size: 12px; }
     .hidden { display: none !important; }
 
-    /* 🧩 Estilos para lista de usuarios */
+    /* Lista de usuarios */
     #userList { list-style: none; padding: 0; margin: 0; }
     #userList li {
       display: flex;
@@ -33,6 +33,12 @@
       font-size: 14px;
     }
     #userList li span.name { flex: 1; }
+
+    /* Audios remotos */
+    #audios { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 8px; }
+    .peer-audio { border: 1px dashed #8886; border-radius: 10px; padding: 8px; }
+    .peer-audio h5 { margin: 0 0 6px 0; font-size: 13px; opacity: .8; }
+    .peer-audio audio { width: 100%; display: block; }
   </style>
 </head>
 <body>
@@ -62,20 +68,18 @@
     <div class="controls">
       <button id="leaveBtn">Salir</button>
       <button id="muteBtn">Silenciar mic</button>
-      <span class="pill" id="pcState">PC: NEW</span>
       <span class="pill" id="iceState">ICE: NEW</span>
     </div>
 
     <div class="sep"></div>
 
-    <!-- 🧩 Lista de usuarios -->
     <h4>Usuarios en la sala</h4>
     <ul id="userList"></ul>
 
     <div class="sep"></div>
-    <div class="row">
-      <audio id="remoteAudio" autoplay playsinline></audio>
-    </div>
+    <h4>Audio de participantes</h4>
+    <div id="audios"></div>
+
     <div class="status" id="callStatus"></div>
   </div>
 
@@ -97,70 +101,22 @@
   const roomTitle = $('#roomTitle');
   const loginStatus = $('#loginStatus');
   const callStatus  = $('#callStatus');
-  const pcStateEl = $('#pcState');
   const iceStateEl = $('#iceState');
-  const remoteAudio = $('#remoteAudio');
   const userList = $('#userList');
+  const audiosWrap = $('#audios');
 
-  let ws, myId, remoteId, myName, myRoom, myKey;
-  let pc = null;
+  let ws, myId, myName, myRoom, myKey;
   let localStream = null;
   let muted = false;
-  let userMap = {}; // { clientId: {name, muted} }
 
-  // Perfect Negotiation
-  let makingOffer = false;
-  let ignoreOffer = false;
-  let polite = false;
-  const pendingCandidates = [];
+  // Estado multipunto
+  const peers = new Map(); // peerId -> { pc, audioEl, polite, makingOffer, pendingCandidates:[] }
+  const users = {};        // clientId -> {name, muted}
 
-  // --- 🗣️ TTS y avisos visuales ---
+  // --- TTS / estado ---
   function speak(text) {
-    try {
-      const msg = new SpeechSynthesisUtterance(text);
-      msg.lang = "es-ES";
-      msg.rate = 1;
-      msg.pitch = 1;
-      speechSynthesis.speak(msg);
-      console.log("[TTS]", text);
-    } catch (e) {
-      console.warn("TTS falló:", e);
-    }
+    try { const msg = new SpeechSynthesisUtterance(text); msg.lang = "es-ES"; speechSynthesis.speak(msg); } catch {}
   }
-
-  function showNotice(message) {
-    callStatus.textContent = message;
-    console.log("[NOTICE]", message);
-  }
-
-  // --- 🧩 Gestión de usuarios ---
-  function renderUserList() {
-    userList.innerHTML = "";
-    Object.entries(userMap).forEach(([id, info]) => {
-      const li = document.createElement("li");
-      const mic = info.muted ? "🔴" : "🟢";
-      const me = id === myId ? " (yo)" : "";
-      li.innerHTML = `<span class="name">${mic} ${info.name}${me}</span>`;
-      userList.appendChild(li);
-    });
-  }
-
-  function addUser(id, name, muted = false) {
-    userMap[id] = { name, muted };
-    renderUserList();
-  }
-
-  function removeUser(id) {
-    delete userMap[id];
-    renderUserList();
-  }
-
-  function updateUserMute(id, m) {
-    if (userMap[id]) userMap[id].muted = m;
-    renderUserList();
-  }
-
-  // LOG helpers
   const L = {
     login: (msg, cls='') => { console.log('[LOGIN]', msg); loginStatus.textContent = msg; loginStatus.className = `status ${cls}`; },
     call:  (msg, cls='') => { console.log('[CALL]', msg);  callStatus.textContent  = msg;  callStatus.className  = `status ${cls}`; },
@@ -170,17 +126,41 @@
     err:   (...a) => console.error('[ERR]', ...a),
   };
 
+  // UI helpers
   function showRoomUI(on) {
     loginCard.classList.toggle('hidden', on);
     roomCard.classList.toggle('hidden', !on);
   }
+  function renderUserList() {
+    userList.innerHTML = "";
+    Object.entries(users).forEach(([id, info]) => {
+      const li = document.createElement("li");
+      const mic = info.muted ? "🔴" : "🟢";
+      const me = id === myId ? " (yo)" : "";
+      li.innerHTML = `<span class="name">${mic} ${info.name}${me}</span>`;
+      userList.appendChild(li);
+    });
+  }
+  function addUser(id, name, isMuted=false) { users[id] = {name, muted:isMuted}; renderUserList(); }
+  function removeUser(id) { delete users[id]; renderUserList(); }
+  function updateUserMute(id, m) { if (users[id]) users[id].muted = m; renderUserList(); }
 
-  function updatePCState() {
-    if (!pc) { pcStateEl.textContent = 'PC: CLOSED'; iceStateEl.textContent = 'ICE: CLOSED'; return; }
-    pcStateEl.textContent = `PC: ${pc.connectionState}`;
-    iceStateEl.textContent = `ICE: ${pc.iceConnectionState}`;
+  // --- Media ---
+  async function ensureLocalStream() {
+    if (localStream && localStream.getTracks().length) return localStream;
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setMicMuted(false);
+    return localStream;
+  }
+  function setMicMuted(m) {
+    muted = m;
+    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !m);
+    muteBtn.textContent = m ? 'Activar mic' : 'Silenciar mic';
+    ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: "mute-changed", muted }));
+    updateUserMute(myId, m);
   }
 
+  // ICE servers
   function buildIceServers(turnOnly=false){
     const ours = [
       { urls: 'turn:cachofotos.ddns.net:3478?transport=udp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
@@ -191,114 +171,167 @@
     return turnOnly ? ours : [...stun, ...ours];
   }
 
-  async function ensureLocalStream() {
-    if (localStream && localStream.getTracks().length) return localStream;
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    return localStream;
+  // Rol "polite": usamos una política determinista por id
+  function isPoliteAgainst(remoteId) {
+    if (!myId || !remoteId) return true;
+    // mismo criterio que tu cliente web previo: "polite" si myId < remoteId
+    return String(myId).localeCompare(String(remoteId)) < 0;
   }
 
-  function setMicMuted(m) {
-    muted = m;
-    if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !m);
-    muteBtn.textContent = m ? 'Activar mic' : 'Silenciar mic';
-    updateUserMute(myId, m);
-    ws && ws.send(JSON.stringify({ type: "mute-changed", muted }));
-  }
+  // Crear (o recuperar) una sesión PC por peer
+  function ensurePeer(peerId, label='Usuario') {
+    if (peers.has(peerId)) return peers.get(peerId);
 
-  function decidePoliteRole() {
-    if (!myId || !remoteId) return;
-    polite = String(myId).localeCompare(String(remoteId)) < 0;
-  }
+    const pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
 
-  function createPC() {
-    if (pc) return pc;
-    pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
-    pc.onconnectionstatechange = updatePCState;
-    pc.oniceconnectionstatechange = updatePCState;
+    // Estado ICE de ese PC (mostramos el "último" estado observado)
+    pc.oniceconnectionstatechange = () => { iceStateEl.textContent = `ICE: ${pc.iceConnectionState}`; };
+
+    // Reenvío de ICE al destinatario correcto
     pc.onicecandidate = ev => {
-      if (ev.candidate && ws && remoteId)
-        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ candidate: ev.candidate } }));
+      if (ev.candidate) {
+        ws && ws.send(JSON.stringify({
+          type:'signal',
+          targetId: peerId,
+          payload:{ candidate: ev.candidate }
+        }));
+      }
     };
+
+    // Audio remoto → un <audio> por peer
+    const card = document.createElement('div');
+    card.className = 'peer-audio';
+    const title = document.createElement('h5');
+    title.textContent = `🎧 ${users[peerId]?.name || label} (${peerId.slice(0,8)})`;
+    const audio = document.createElement('audio');
+    audio.autoplay = true; audio.playsInline = true; audio.controls = true;
+    card.appendChild(title); card.appendChild(audio);
+    audiosWrap.appendChild(card);
+
     pc.ontrack = ev => {
-      remoteAudio.srcObject = ev.streams?.[0] || new MediaStream([ev.track]);
+      audio.srcObject = ev.streams?.[0] || new MediaStream([ev.track]);
     };
-    return pc;
+
+    // Añadimos nuestra pista local si no está
+    const sess = {
+      pc,
+      audioEl: audio,
+      cardEl: card,
+      polite: isPoliteAgainst(peerId),
+      makingOffer: false,
+      pendingCandidates: []
+    };
+
+    // Añadir (única) pista de audio local a este PC
+    if (localStream) {
+      const have = pc.getSenders().map(s => s.track);
+      localStream.getAudioTracks().forEach(t => {
+        if (!have.includes(t)) pc.addTrack(t, localStream);
+      });
+    }
+
+    peers.set(peerId, sess);
+    return sess;
   }
 
-  function ensureTrackAdded(pc) {
-    if (!localStream) return;
-    const existing = pc.getSenders().map(s => s.track);
-    localStream.getAudioTracks().forEach(track => {
-      if (!existing.includes(track)) pc.addTrack(track, localStream);
-    });
+  // Eliminar peer
+  function dropPeer(peerId) {
+    const sess = peers.get(peerId);
+    if (!sess) return;
+    try { sess.pc.close(); } catch {}
+    if (sess.cardEl?.parentNode) sess.cardEl.parentNode.removeChild(sess.cardEl);
+    peers.delete(peerId);
   }
 
-  async function startCallIfCaller() {
-    if (!polite && remoteId) {
-      const pc = createPC();
-      ensureTrackAdded(pc);
+  // Iniciar oferta (caller) hacia un peer
+  async function maybeCall(peerId) {
+    const sess = peers.get(peerId);
+    if (!sess) return;
+    const { pc } = sess;
+
+    try {
+      sess.makingOffer = true;
+      // Por compatibilidad con tu servidor actual: offerToReceiveAudio
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
-      ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'offer', sdp:offer.sdp } } }));
+      ws && ws.send(JSON.stringify({
+        type:'signal',
+        targetId: peerId,
+        payload:{ sdp:{ type:'offer', sdp: offer.sdp } }
+      }));
+    } catch (e) {
+      L.err('createOffer/setLocalDescription error', e);
+    } finally {
+      sess.makingOffer = false;
     }
   }
 
-  async function handleSignal(msg) {
-    const { fromId, payload } = msg;
-    if (!remoteId) {
-      remoteId = fromId;
-      decidePoliteRole();
-    }
-    const pc = createPC();
+  // Señalización entrante (de un peer concreto)
+  async function handleSignalFrom(fromId, payload) {
+    const sess = ensurePeer(fromId);
+    const { pc } = sess;
 
     if (payload.sdp) {
       const { type, sdp } = payload.sdp;
       const isOffer = type === 'offer';
-      const offerCollision = isOffer && (makingOffer || pc.signalingState !== 'stable');
+      const offerCollision = isOffer && (sess.makingOffer || pc.signalingState !== 'stable');
+
       if (offerCollision) {
-        if (!polite) return;
-        await Promise.allSettled([
-          pc.setLocalDescription({ type: 'rollback' }),
-          pc.setRemoteDescription({ type: 'offer', sdp })
-        ]);
-        ensureTrackAdded(pc);
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
-        return;
+        if (!sess.polite) {
+          L.rtc(`⚠️ Colisión de oferta con ${fromId}: impolite → ignoro`);
+          return;
+        }
+        try {
+          await pc.setLocalDescription({ type: 'rollback' });
+        } catch {}
       }
+
       if (isOffer) {
         await pc.setRemoteDescription({ type:'offer', sdp });
-        ensureTrackAdded(pc);
+        // garantizar pista local
+        if (localStream) {
+          const have = pc.getSenders().map(s => s.track);
+          localStream.getAudioTracks().forEach(t => {
+            if (!have.includes(t)) pc.addTrack(t, localStream);
+          });
+        }
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        ws.send(JSON.stringify({ type:'signal', targetId: remoteId, payload:{ sdp:{ type:'answer', sdp:answer.sdp } } }));
+        ws && ws.send(JSON.stringify({
+          type:'signal',
+          targetId: fromId,
+          payload:{ sdp:{ type:'answer', sdp: answer.sdp } }
+        }));
+        // Drenar ICE pendientes
+        while (sess.pendingCandidates.length) {
+          const c = sess.pendingCandidates.shift();
+          try { await pc.addIceCandidate(c); } catch {}
+        }
         return;
       }
+
       if (type === 'answer') {
         if (pc.signalingState !== 'have-local-offer') return;
         await pc.setRemoteDescription({ type:'answer', sdp });
+        // Drenar ICE pendientes
+        while (sess.pendingCandidates.length) {
+          const c = sess.pendingCandidates.shift();
+          try { await pc.addIceCandidate(c); } catch {}
+        }
         return;
       }
     }
 
     if (payload.candidate) {
-      if (!pc.remoteDescription) pendingCandidates.push(payload.candidate);
-      else await pc.addIceCandidate(payload.candidate);
+      if (!pc.remoteDescription) {
+        sess.pendingCandidates.push(payload.candidate);
+      } else {
+        try { await pc.addIceCandidate(payload.candidate); } catch {}
+      }
     }
   }
 
-  function teardownPC(stopTracks){
-    if (pc) { try { pc.close(); } catch {} }
-    pc = null;
-    pendingCandidates.length = 0;
-    if (stopTracks && localStream) {
-      localStream.getTracks().forEach(t => t.stop());
-      localStream = null;
-    }
-    remoteAudio.srcObject = null;
-  }
-
+  // WebSocket
   function connectWS(){
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     ws = new WebSocket(wsUrl);
@@ -314,56 +347,78 @@
       switch(msg.type){
         case 'auth-failed':
           L.login(`Clave incorrecta para sala "${myRoom}"`, 'err');
-          ws.close(); showRoomUI(false);
+          try { ws.close(); } catch {}
+          showRoomUI(false);
           break;
-        case 'joined':
+
+        case 'joined': {
           myId = msg.clientId;
           roomTitle.textContent = `Sala: ${msg.room}`;
           showRoomUI(true);
-          userMap = {};
+
+          // Reiniciar estado visual/peers
+          audiosWrap.innerHTML = '';
+          for (const [pid] of peers) dropPeer(pid);
+          Object.keys(users).forEach(k => delete users[k]);
+
           addUser(myId, myName, muted);
           (msg.peers || []).forEach(p => addUser(p.clientId, p.name, p.muted));
           L.login(`Unido a sala "${msg.room}"`, 'ok');
-          if (Array.isArray(msg.peers) && msg.peers.length) {
-            remoteId = msg.peers[0].clientId;
-            decidePoliteRole();
-            await ensureLocalStream();
-            setMicMuted(false);
-            startCallIfCaller();
-          } else {
-            L.call('Sala vacía. Esperando otro usuario…');
+
+          // Creamos PCs hacia peers existentes y lanzamos oferta si somos "impolite"
+          await ensureLocalStream();
+          for (const p of (msg.peers || [])) {
+            const sess = ensurePeer(p.clientId, p.name);
+            if (!sess.polite) await maybeCall(p.clientId);
+          }
+          if (!Array.isArray(msg.peers) || !msg.peers.length) {
+            L.call('Sala vacía. Esperando otros usuarios…');
           }
           break;
-        case 'peer-joined':
-          const joinName = msg.name || 'un usuario';
-          addUser(msg.clientId, joinName, msg.muted);
-          speak(`${joinName} se ha unido a la sala`);
-          showNotice(`👋 ${joinName} se ha unido a la sala`);
+        }
+
+        case 'peer-joined': {
+          const pid = msg.clientId;
+          const pname = msg.name || 'un usuario';
+          addUser(pid, pname, msg.muted);
+          speak(`${pname} se ha unido a la sala`);
+          L.call(`👋 ${pname} se ha unido`);
+
+          // Crear PC y, si somos impolite respecto a él, originar oferta
+          ensureLocalStream().then(async () => {
+            const sess = ensurePeer(pid, pname);
+            if (!sess.polite) await maybeCall(pid);
+          });
           break;
-        case 'peer-left':
-          const leftName = msg.name || 'un usuario';
-          speak(`${leftName} ha salido de la sala`);
-          showNotice(`❌ ${leftName} ha salido de la sala`);
-          removeUser(msg.clientId);
-          if (msg.clientId === remoteId) { remoteId = null; teardownPC(false); }
+        }
+
+        case 'peer-left': {
+          const pid = msg.clientId;
+          const pname = msg.name || 'un usuario';
+          speak(`${pname} ha salido de la sala`);
+          L.call(`❌ ${pname} salió`);
+          removeUser(pid);
+          dropPeer(pid);
           break;
+        }
+
         case 'mute-changed':
           updateUserMute(msg.clientId, msg.muted);
           break;
+
         case 'signal':
-          await handleSignal(msg);
+          await handleSignalFrom(msg.fromId, msg.payload || {});
           break;
       }
     };
   }
 
+  // Entrar / Salir / Mute
   enterBtn.onclick = async () => {
     myName = nameInput.value.trim();
     myRoom = roomInput.value.trim();
     myKey  = keyInput.value.trim();
-    if (!myName || !myRoom || !myKey) {
-      L.login('Completa todos los campos','err'); return;
-    }
+    if (!myName || !myRoom || !myKey) { L.login('Completa todos los campos','err'); return; }
     await ensureLocalStream();
     setMicMuted(false);
     connectWS();
@@ -371,8 +426,8 @@
 
   leaveBtn.onclick = () => {
     try { ws && ws.close(); } catch {}
-    remoteId = null;
-    teardownPC(true);
+    for (const [pid] of peers) dropPeer(pid);
+    audiosWrap.innerHTML = '';
     showRoomUI(false);
   };
 
