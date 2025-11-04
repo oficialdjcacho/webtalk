@@ -22,7 +22,6 @@
     .pill { padding: 6px 10px; border-radius: 999px; border: 1px dashed #8886; font-size: 12px; }
     .hidden { display: none !important; }
 
-    /* Lista de usuarios */
     #userList { list-style: none; padding: 0; margin: 0; }
     #userList li {
       display: flex;
@@ -34,7 +33,6 @@
     }
     #userList li span.name { flex: 1; }
 
-    /* Audios remotos */
     #audios { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 8px; }
     .peer-audio { border: 1px dashed #8886; border-radius: 10px; padding: 8px; }
     .peer-audio h5 { margin: 0 0 6px 0; font-size: 13px; opacity: .8; }
@@ -44,10 +42,9 @@
 <body>
 <div class="wrap">
 
-  <!-- LOGIN -->
   <div class="card" id="loginCard">
     <h2>WebTalk</h2>
-    <p>Introduce <b>nombre</b>, <b>sala</b> y <b>clave</b>. Todos los usuarios con la misma sala y clave se comunican entre sí.</p>
+    <p>Introduce <b>nombre</b>, <b>sala</b> y <b>clave</b>.</p>
     <div class="row">
       <input id="nameInput" placeholder="Tu nombre" maxlength="64"/>
     </div>
@@ -62,7 +59,6 @@
     <div class="status" id="loginStatus"></div>
   </div>
 
-  <!-- SALA -->
   <div class="card hidden" id="roomCard">
     <h3><span id="roomTitle"></span> <span class="dim">(mic siempre abierto)</span></h3>
     <div class="controls">
@@ -70,7 +66,6 @@
       <button id="muteBtn">Silenciar mic</button>
       <span class="pill" id="iceState">ICE: NEW</span>
     </div>
-
     <div class="sep"></div>
 
     <h4>Usuarios en la sala</h4>
@@ -108,23 +103,23 @@
   let ws, myId, myName, myRoom, myKey;
   let localStream = null;
   let muted = false;
+  let manualLeave = false; // 🔸 NUEVO: evitar reconexión tras salir
 
-  // --- NUEVO: Reconexión automática ---
+  // --- Reconexión automática ---
   let reconnectTimer = null;
   function scheduleReconnect() {
+    if (manualLeave) return; // no reconectar si se salió manualmente
     if (reconnectTimer) return;
     L.ws("Intentando reconectar WebSocket...");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connectWS();
-    }, 3000); // reintenta cada 3 segundos
+    }, 3000);
   }
 
-  // Estado multipunto
-  const peers = new Map(); // peerId -> { pc, audioEl, polite, makingOffer, pendingCandidates:[] }
-  const users = {};        // clientId -> {name, muted}
+  const peers = new Map();
+  const users = {};
 
-  // --- TTS / estado ---
   function speak(text) {
     try { const msg = new SpeechSynthesisUtterance(text); msg.lang = "es-ES"; speechSynthesis.speak(msg); } catch {}
   }
@@ -137,7 +132,6 @@
     err:   (...a) => console.error('[ERR]', ...a),
   };
 
-  // UI helpers
   function showRoomUI(on) {
     loginCard.classList.toggle('hidden', on);
     roomCard.classList.toggle('hidden', !on);
@@ -156,7 +150,6 @@
   function removeUser(id) { delete users[id]; renderUserList(); }
   function updateUserMute(id, m) { if (users[id]) users[id].muted = m; renderUserList(); }
 
-  // --- Media ---
   async function ensureLocalStream() {
     if (localStream && localStream.getTracks().length) return localStream;
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -171,7 +164,6 @@
     updateUserMute(myId, m);
   }
 
-  // ICE servers
   function buildIceServers(turnOnly=false){
     const ours = [
       { urls: 'turn:cachofotos.ddns.net:3478?transport=udp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
@@ -182,19 +174,16 @@
     return turnOnly ? ours : [...stun, ...ours];
   }
 
-  // Rol "polite": usamos una política determinista por id
   function isPoliteAgainst(remoteId) {
     if (!myId || !remoteId) return true;
     return String(myId).localeCompare(String(remoteId)) < 0;
   }
 
-  // Crear (o recuperar) una sesión PC por peer
   function ensurePeer(peerId, label='Usuario') {
     if (peers.has(peerId)) return peers.get(peerId);
 
     const pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
 
-    // Estado ICE de ese PC (mostramos el "último" estado observado)
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
       iceStateEl.textContent = `ICE: ${state}`;
@@ -208,7 +197,6 @@
       }
     };
 
-    // Reenvío de ICE al destinatario correcto
     pc.onicecandidate = ev => {
       if (ev.candidate) {
         ws && ws.send(JSON.stringify({
@@ -219,7 +207,6 @@
       }
     };
 
-    // Audio remoto → un <audio> por peer
     const card = document.createElement('div');
     card.className = 'peer-audio';
     const title = document.createElement('h5');
@@ -233,14 +220,7 @@
       audio.srcObject = ev.streams?.[0] || new MediaStream([ev.track]);
     };
 
-    const sess = {
-      pc,
-      audioEl: audio,
-      cardEl: card,
-      polite: isPoliteAgainst(peerId),
-      makingOffer: false,
-      pendingCandidates: []
-    };
+    const sess = { pc, audioEl: audio, cardEl: card, polite: isPoliteAgainst(peerId), makingOffer: false, pendingCandidates: [] };
 
     if (localStream) {
       const have = pc.getSenders().map(s => s.track);
@@ -253,7 +233,6 @@
     return sess;
   }
 
-  // Eliminar peer
   function dropPeer(peerId) {
     const sess = peers.get(peerId);
     if (!sess) return;
@@ -262,7 +241,6 @@
     peers.delete(peerId);
   }
 
-  // Iniciar oferta (caller) hacia un peer
   async function maybeCall(peerId) {
     const sess = peers.get(peerId);
     if (!sess) return;
@@ -283,16 +261,13 @@
     }
   }
 
-  // Señalización entrante
   async function handleSignalFrom(fromId, payload) {
     const sess = ensurePeer(fromId);
     const { pc } = sess;
-
     if (payload.sdp) {
       const { type, sdp } = payload.sdp;
       const isOffer = type === 'offer';
       const offerCollision = isOffer && (sess.makingOffer || pc.signalingState !== 'stable');
-
       if (offerCollision) {
         if (!sess.polite) {
           L.rtc(`⚠️ Colisión de oferta con ${fromId}: impolite → rehago conexión`);
@@ -307,7 +282,6 @@
         }
         try { await pc.setLocalDescription({ type: 'rollback' }); } catch {}
       }
-
       if (isOffer) {
         await pc.setRemoteDescription({ type:'offer', sdp });
         if (localStream) {
@@ -329,7 +303,6 @@
         }
         return;
       }
-
       if (type === 'answer') {
         if (pc.signalingState !== 'have-local-offer') return;
         await pc.setRemoteDescription({ type:'answer', sdp });
@@ -340,7 +313,6 @@
         return;
       }
     }
-
     if (payload.candidate) {
       if (!pc.remoteDescription) {
         sess.pendingCandidates.push(payload.candidate);
@@ -350,7 +322,6 @@
     }
   }
 
-  // WebSocket
   function connectWS(){
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     ws = new WebSocket(wsUrl);
@@ -370,19 +341,16 @@
           showRoomUI(false);
           break;
 
-        case 'joined': {
+        case 'joined':
           myId = msg.clientId;
           roomTitle.textContent = `Sala: ${msg.room}`;
           showRoomUI(true);
-
           audiosWrap.innerHTML = '';
           for (const [pid] of peers) dropPeer(pid);
           Object.keys(users).forEach(k => delete users[k]);
-
           addUser(myId, myName, muted);
           (msg.peers || []).forEach(p => addUser(p.clientId, p.name, p.muted));
           L.login(`Unido a sala "${msg.room}"`, 'ok');
-
           await ensureLocalStream();
           for (const p of (msg.peers || [])) {
             const sess = ensurePeer(p.clientId, p.name);
@@ -392,7 +360,6 @@
             L.call('Sala vacía. Esperando otros usuarios…');
           }
           break;
-        }
 
         case 'peer-joined':
           const pid = msg.clientId;
@@ -425,9 +392,8 @@
       }
     };
 
-    // --- NUEVO: reconectar si se pierde la conexión WS ---
     ws.onclose = () => {
-      L.ws("Conexión WebSocket cerrada. Intentando reconectar...");
+      L.ws("Conexión WebSocket cerrada.");
       scheduleReconnect();
     };
     ws.onerror = () => {
@@ -435,27 +401,33 @@
       scheduleReconnect();
     };
 
-    // --- NUEVO: mantener viva la sesión ---
     setInterval(() => {
       if (ws && ws.readyState === 1)
         ws.send(JSON.stringify({ type: "ping" }));
     }, 10000);
   }
 
-  // Entrar / Salir / Mute
   enterBtn.onclick = async () => {
     myName = nameInput.value.trim();
     myRoom = roomInput.value.trim();
     myKey  = keyInput.value.trim();
     if (!myName || !myRoom || !myKey) { L.login('Completa todos los campos','err'); return; }
+    manualLeave = false; // reiniciamos bandera
     await ensureLocalStream();
     setMicMuted(false);
     connectWS();
   };
 
   leaveBtn.onclick = () => {
+    manualLeave = true; // evitar reconexión
     try { ws && ws.close(); } catch {}
     for (const [pid] of peers) dropPeer(pid);
+    peers.clear();
+    // detener micrófono
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
     audiosWrap.innerHTML = '';
     showRoomUI(false);
   };
