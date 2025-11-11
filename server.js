@@ -29,7 +29,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, path: '/ws' });
 
 // --- Estructuras de datos ---
 // rooms: Map<roomName, { key, clients: Map<clientId, { ws, name, isAlive, muted }> }>
