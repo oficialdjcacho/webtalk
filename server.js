@@ -32,7 +32,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 // --- Estructuras de datos ---
-// rooms: Map<roomName, { key, clients: Map<clientId, { ws, name, isAlive, muted }> }>
+// rooms: Map<roomName, { key, clients: Map<clientId, { ws, name, isAlive, muted, group, role }> }>
 const rooms = new Map();
 
 // --- Funciones de utilidad ---
@@ -41,16 +41,6 @@ function getOrCreateRoom(roomName, key) {
     rooms.set(roomName, { key, clients: new Map() });
   }
   return rooms.get(roomName);
-}
-
-function broadcast(roomName, payload, excludeId = null) {
-  const room = rooms.get(roomName);
-  if (!room) return;
-  const msg = JSON.stringify(payload);
-  for (const [cid, info] of room.clients.entries()) {
-    if (excludeId && cid === excludeId) continue;
-    try { info.ws.send(msg); } catch {}
-  }
 }
 
 function removeClient(roomName, clientId) {
@@ -66,6 +56,8 @@ wss.on("connection", (ws) => {
   let joined = false;
   let name = "Anónimo";
   let roomName = null;
+  let group = "default";
+  let role = "user";
 
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
@@ -76,9 +68,11 @@ wss.on("connection", (ws) => {
 
     // ---- JOIN ----
     if (msg.type === "join") {
-      name = String(msg.name || "Anónimo").slice(0, 64);
+      name  = String(msg.name  || "Anónimo").slice(0, 64);
       roomName = String(msg.room || "").trim();
-      const key = String(msg.key || "").trim();
+      const key  = String(msg.key  || "").trim();
+      group = String(msg.group || "default").slice(0, 32);
+      role  = String(msg.role  || "user").slice(0, 16);
 
       if (!roomName || !key) {
         ws.send(JSON.stringify({ type: "auth-failed", reason: "Sala o clave vacía" }));
@@ -93,26 +87,27 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Añadir cliente
-      room.clients.set(clientId, { ws, name, isAlive: true, muted: false });
+      room.clients.set(clientId, { ws, name, isAlive: true, muted: false, group, role });
       joined = true;
 
       // Peers actuales (sin mí)
       const peers = [];
       for (const [cid, info] of room.clients.entries()) {
-        if (cid !== clientId) peers.push({ clientId: cid, name: info.name, muted: info.muted });
+        if (cid !== clientId) peers.push({ clientId: cid, name: info.name, muted: info.muted, group: info.group, role: info.role });
       }
 
       // Notificar al nuevo
-      ws.send(JSON.stringify({ 
-        type: "joined", 
-        clientId, 
-        peers, 
-        room: roomName 
+      ws.send(JSON.stringify({
+        type: "joined",
+        clientId,
+        peers,
+        room: roomName,
+        yourGroup: group,
+        yourRole: role
       }));
 
       // Avisar a los demás
-      broadcast(roomName, { type: "peer-joined", clientId, name, muted: false }, clientId);
+      broadcast(roomName, { type: "peer-joined", clientId, name, muted: false, group, role }, clientId);
       return;
     }
 
@@ -123,7 +118,15 @@ wss.on("connection", (ws) => {
       const info = room.clients.get(clientId);
       if (info) {
         info.muted = !!msg.muted;
-        broadcast(roomName, { type: "mute-changed", clientId, muted: info.muted }, clientId);
+        // enviar solo a mismo grupo + admins
+        for (const [cid, cinfo] of room.clients.entries()) {
+          if (cid === clientId) continue;
+          const sameGroup = cinfo.group === info.group;
+          const isAdmin   = cinfo.role === "admin";
+          if (sameGroup || isAdmin) {
+            try { cinfo.ws.send(JSON.stringify({ type: "mute-changed", clientId, muted: info.muted })); } catch {}
+          }
+        }
       }
       return;
     }
@@ -134,10 +137,17 @@ wss.on("connection", (ws) => {
       const { targetId, payload } = msg;
       const room = rooms.get(roomName);
       if (!room) return;
+      const sender = room.clients.get(clientId);
       const target = room.clients.get(targetId);
-      if (target) {
-        target.ws.send(JSON.stringify({ type: "signal", fromId: clientId, payload }));
-      }
+      if (!sender || !target) return;
+
+      // Regla de encaminamiento
+      const sameGroup   = sender.group === target.group;
+      const senderAdmin = sender.role === "admin";
+      const targetAdmin = target.role === "admin";
+      if (!sameGroup && !senderAdmin && !targetAdmin) return; // no reenviar
+
+      target.ws.send(JSON.stringify({ type: "signal", fromId: clientId, payload }));
       return;
     }
 
