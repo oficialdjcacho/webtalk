@@ -43,6 +43,16 @@ function getOrCreateRoom(roomName, key) {
   return rooms.get(roomName);
 }
 
+function broadcast(roomName, payload, excludeId = null) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+  const msg = JSON.stringify(payload);
+  for (const [cid, info] of room.clients.entries()) {
+    if (excludeId && cid === excludeId) continue;
+    try { info.ws.send(msg); } catch {}
+  }
+}
+
 function removeClient(roomName, clientId) {
   const room = rooms.get(roomName);
   if (!room) return;
