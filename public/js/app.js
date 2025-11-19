@@ -165,7 +165,12 @@
     audiosWrap.appendChild(card);
 
     pc.ontrack = ev => {
-      audio.srcObject = ev.streams?.[0] || new MediaStream([ev.track]);
+      const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+      audio.srcObject = stream;
+      audio.play().catch(e => {
+        console.warn('[Web] Autoplay bloqueado:', e);
+        document.addEventListener('click', () => audio.play(), { once: true });
+      });
     };
 
     const sess = { pc, audioEl: audio, cardEl: card, polite: isPoliteAgainst(peerId), makingOffer: false, pendingCandidates: [] };
