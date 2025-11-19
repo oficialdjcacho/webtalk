@@ -97,6 +97,11 @@
   async function ensureLocalStream() {
     if (localStream && localStream.getTracks().length) return localStream;
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // 🔥 Asegura que el mic esté activo
+    localStream.getAudioTracks().forEach(t => {
+      t.enabled = true;
+      t.applyConstraints({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    });
     setMicMuted(false);
     return localStream;
   }
@@ -160,25 +165,23 @@
     audio.autoplay = true;
     audio.playsInline = true;
     audio.controls = true;
-    audio.muted = true;
     card.appendChild(title);
     card.appendChild(audio);
     audiosWrap.appendChild(card);
 
     pc.ontrack = ev => {
-  const stream = ev.streams?.[0] || new MediaStream([ev.track]);
-  audio.srcObject = stream;
-  audio.play().catch(() => {
-    console.warn('[Web] Autoplay bloqueado → esperando clic');
-    const unlock = () => {
-      audio.play().catch(() => {});
-      document.removeEventListener('click', unlock);
-      document.removeEventListener('touchstart', unlock);
+      const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+      audio.srcObject = stream;
+
+      // 🔥 Fuerza play solo tras interacción
+      const tryPlay = () => audio.play().catch(() => {});
+      if (document.body.matches(':hover')) {
+        tryPlay(); // ya hay interacción
+      } else {
+        document.addEventListener('click', tryPlay, { once: true });
+        document.addEventListener('touchstart', tryPlay, { once: true });
+      }
     };
-    document.addEventListener('click', unlock, { once: true });
-    document.addEventListener('touchstart', unlock, { once: true });
-  });
-};
 
     const sess = { pc, audioEl: audio, cardEl: card, polite: isPoliteAgainst(peerId), makingOffer: false, pendingCandidates: [] };
 
