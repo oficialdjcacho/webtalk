@@ -166,14 +166,19 @@
     audiosWrap.appendChild(card);
 
     pc.ontrack = ev => {
-      const stream = ev.streams?.[0] || new MediaStream([ev.track]);
-      audio.srcObject = stream;
-      audio.muted = false;
-      audio.play().catch(e => {
-        console.warn('[Web] Autoplay bloqueado:', e);
-        document.addEventListener('click', () => audio.play(), { once: true });
-      });
+  const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+  audio.srcObject = stream;
+  audio.play().catch(() => {
+    console.warn('[Web] Autoplay bloqueado → esperando clic');
+    const unlock = () => {
+      audio.play().catch(() => {});
+      document.removeEventListener('click', unlock);
+      document.removeEventListener('touchstart', unlock);
     };
+    document.addEventListener('click', unlock, { once: true });
+    document.addEventListener('touchstart', unlock, { once: true });
+  });
+};
 
     const sess = { pc, audioEl: audio, cardEl: card, polite: isPoliteAgainst(peerId), makingOffer: false, pendingCandidates: [] };
 
