@@ -160,6 +160,7 @@
     audio.autoplay = true;
     audio.playsInline = true;
     audio.controls = true;
+    audio.muted = true;
     card.appendChild(title);
     card.appendChild(audio);
     audiosWrap.appendChild(card);
@@ -167,6 +168,7 @@
     pc.ontrack = ev => {
       const stream = ev.streams?.[0] || new MediaStream([ev.track]);
       audio.srcObject = stream;
+      audio.muted = false;
       audio.play().catch(e => {
         console.warn('[Web] Autoplay bloqueado:', e);
         document.addEventListener('click', () => audio.play(), { once: true });
