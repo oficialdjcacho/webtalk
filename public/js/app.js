@@ -6,6 +6,8 @@
   const nameInput = $('#nameInput');
   const roomInput = $('#roomInput');
   const keyInput   = $('#keyInput');
+  const groupInput = $('#groupInput');
+  const roleInput  = $('#roleInput');
   const enterBtn  = $('#enterBtn');
   const leaveBtn  = $('#leaveBtn');
   const muteBtn   = $('#muteBtn');
@@ -17,15 +19,14 @@
   const userList = $('#userList');
   const audiosWrap = $('#audios');
 
-  let ws, myId, myName, myRoom, myKey;
+  let ws, myId, myName, myRoom, myKey, myGroup, myRole;
   let localStream = null;
   let muted = false;
-  let manualLeave = false; // 🔸 evitar reconexión tras salir
+  let manualLeave = false;
 
-  // --- Reconexión automática ---
   let reconnectTimer = null;
   function scheduleReconnect() {
-    if (manualLeave) return; // no reconectar si se salió manualmente
+    if (manualLeave) return;
     if (reconnectTimer) return;
     L.ws("Intentando reconectar WebSocket...");
     reconnectTimer = setTimeout(() => {
@@ -37,7 +38,6 @@
   const peers = new Map();
   const users = {};
 
-  // --- TTS / estado ---
   function speak(text) {
     try {
       const msg = new SpeechSynthesisUtterance(text);
@@ -63,7 +63,6 @@
     err: (...a) => console.error('[ERR]', ...a),
   };
 
-  // --- UI helpers ---
   function showRoomUI(on) {
     loginCard.classList.toggle('hidden', on);
     roomCard.classList.toggle('hidden', !on);
@@ -95,7 +94,6 @@
     renderUserList();
   }
 
-  // --- Media ---
   async function ensureLocalStream() {
     if (localStream && localStream.getTracks().length) return localStream;
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -111,7 +109,6 @@
     updateUserMute(myId, m);
   }
 
-  // --- ICE servers ---
   function buildIceServers(turnOnly=false) {
     const ours = [
       { urls: 'turn:cachofotos.ddns.net:3478?transport=udp', username: 'djcacho', credential: '4+ymh5XaTXzAVkUB' },
@@ -122,19 +119,16 @@
     return turnOnly ? ours : [...stun, ...ours];
   }
 
-  // --- Política "polite" determinista ---
   function isPoliteAgainst(remoteId) {
     if (!myId || !remoteId) return true;
     return String(myId).localeCompare(String(remoteId)) < 0;
   }
 
-  // --- Crear (o recuperar) un RTCPeerConnection ---
   function ensurePeer(peerId, label='Usuario') {
     if (peers.has(peerId)) return peers.get(peerId);
 
     const pc = new RTCPeerConnection({ iceServers: buildIceServers(turnOnlyChk.checked), sdpSemantics: 'unified-plan' });
 
-    // Estado ICE
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
       iceStateEl.textContent = `ICE: ${state}`;
@@ -148,7 +142,6 @@
       }
     };
 
-    // Envío de candidatos ICE
     pc.onicecandidate = ev => {
       if (ev.candidate) {
         ws && ws.send(JSON.stringify({
@@ -159,7 +152,6 @@
       }
     };
 
-    // Audio remoto
     const card = document.createElement('div');
     card.className = 'peer-audio';
     const title = document.createElement('h5');
@@ -189,7 +181,6 @@
     return sess;
   }
 
-  // --- Eliminar peer ---
   function dropPeer(peerId) {
     const sess = peers.get(peerId);
     if (!sess) return;
@@ -198,7 +189,6 @@
     peers.delete(peerId);
   }
 
-  // --- Iniciar oferta ---
   async function maybeCall(peerId) {
     const sess = peers.get(peerId);
     if (!sess) return;
@@ -219,7 +209,6 @@
     }
   }
 
-  // --- Señalización ---
   async function handleSignalFrom(fromId, payload) {
     const sess = ensurePeer(fromId);
     const { pc } = sess;
@@ -281,13 +270,19 @@
     }
   }
 
-  // --- WebSocket principal ---
   function connectWS() {
     const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type:'join', name:myName, room:myRoom, key:myKey }));
+      ws.send(JSON.stringify({
+        type:'join',
+        name:myName,
+        room:myRoom,
+        key:myKey,
+        group:myGroup,
+        role:myRole
+      }));
     };
 
     ws.onmessage = async ev => {
@@ -368,11 +363,13 @@
     }, 10000);
   }
 
-  // --- Eventos UI ---
   enterBtn.onclick = async () => {
     myName = nameInput.value.trim();
     myRoom = roomInput.value.trim();
     myKey  = keyInput.value.trim();
+    myGroup = groupInput.value.trim() || 'default';
+    myRole  = roleInput.value.trim() || 'user';
+
     if (!myName || !myRoom || !myKey) { L.login('Completa todos los campos','err'); return; }
     manualLeave = false;
     await ensureLocalStream();
@@ -397,4 +394,3 @@
 
   showRoomUI(false);
 })();
-
