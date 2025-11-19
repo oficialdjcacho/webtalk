@@ -4,8 +4,6 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
   <title>WebTalk</title>
-
-  <!-- Enlaces a estilos -->
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
@@ -21,12 +19,18 @@
     <div class="row">
       <input id="roomInput" placeholder="Nombre de la sala" maxlength="64"/>
       <input id="keyInput" placeholder="Clave" maxlength="64" type="password"/>
-      <button id="enterBtn">Entrar</button>
+    </div>
+    <div class="row">
+      <input id="groupInput" placeholder="Grupo (default)" maxlength="32" value="default"/>
+      <input id="roleInput" placeholder="Rol (user/admin)" maxlength="16" value="user"/>
     </div>
     <div class="row">
       <label class="pill"><input type="checkbox" id="turnOnlyChk"> Usar TURN sólo</label>
     </div>
     <div class="status" id="loginStatus"></div>
+    <div class="row">
+      <button id="enterBtn">Entrar</button>
+    </div>
   </div>
 
   <!-- SALA -->
