@@ -43,13 +43,19 @@ function getOrCreateRoom(roomName, key) {
   return rooms.get(roomName);
 }
 
-function broadcast(roomName, payload, excludeId = null) {
+function broadcastToGroup(roomName, payload, excludeId = null) {
   const room = rooms.get(roomName);
   if (!room) return;
   const msg = JSON.stringify(payload);
+  const sender = room.clients.get(excludeId);
+  if (!sender) return;
   for (const [cid, info] of room.clients.entries()) {
-    if (excludeId && cid === excludeId) continue;
-    try { info.ws.send(msg); } catch {}
+    if (cid === excludeId) continue;
+    const sameGroup = info.group === sender.group;
+    const eitherAdmin = info.role === "admin" || sender.role === "admin";
+    if (sameGroup || eitherAdmin) {
+      try { info.ws.send(msg); } catch {}
+    }
   }
 }
 
@@ -116,8 +122,8 @@ wss.on("connection", (ws) => {
         yourRole: role
       }));
 
-      // Avisar a los demás
-      broadcast(roomName, { type: "peer-joined", clientId, name, muted: false, group, role }, clientId);
+      // Avisar solo a los que deben ver este peer
+      broadcastToGroup(roomName, { type: "peer-joined", clientId, name, muted: false, group, role }, clientId);
       return;
     }
 
@@ -173,7 +179,7 @@ wss.on("connection", (ws) => {
       const room = rooms.get(roomName);
       if (room) {
         removeClient(roomName, clientId);
-        broadcast(roomName, { type: "peer-left", clientId, name });
+        broadcastToGroup(roomName, { type: "peer-left", clientId, name }, clientId);
       }
     }
   });
@@ -183,7 +189,7 @@ wss.on("connection", (ws) => {
       const room = rooms.get(roomName);
       if (room) {
         removeClient(roomName, clientId);
-        broadcast(roomName, { type: "peer-left", clientId, name });
+        broadcastToGroup(roomName, { type: "peer-left", clientId, name }, clientId);
       }
     }
   });
@@ -197,7 +203,7 @@ setInterval(() => {
       if (ws.isAlive === false) {
         try { ws.terminate(); } catch {}
         room.clients.delete(cid);
-        broadcast(roomName, { type: "peer-left", clientId: cid, name: info.name });
+        broadcastToGroup(roomName, { type: "peer-left", clientId: cid, name: info.name });
       } else {
         ws.isAlive = false;
         try { ws.ping(); } catch {}
