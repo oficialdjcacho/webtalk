@@ -173,7 +173,7 @@
     audio.autoplay = true;
     audio.playsInline = true;
     audio.controls = true;
-    audio.muted = true;
+    audio.muted = false;
     card.appendChild(title);
     card.appendChild(audio);
     audiosWrap.appendChild(card);
@@ -181,7 +181,7 @@
     pc.ontrack = ev => {
   const stream = ev.streams?.[0] || new MediaStream([ev.track]);
   audio.srcObject = stream;
-  audio.play().catch(() => {
+    audio.play().catch(() => {
     console.warn('[Web] Autoplay bloqueado → esperando clic');
     const unlock = () => {
       audio.play().catch(() => {});
