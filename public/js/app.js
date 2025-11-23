@@ -37,6 +37,7 @@
 
   const peers = new Map();
   const users = {};
+  let myTargetGroups = ["default"]; // <-- NUEVO: grupos activos del admin
 
   function speak(text) {
     try {
@@ -97,11 +98,6 @@
   async function ensureLocalStream() {
     if (localStream && localStream.getTracks().length) return localStream;
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    // 🔥 Asegura que el mic esté activo
-    localStream.getAudioTracks().forEach(t => {
-      t.enabled = true;
-      t.applyConstraints({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
-    });
     setMicMuted(false);
     return localStream;
   }
@@ -127,6 +123,18 @@
   function isPoliteAgainst(remoteId) {
     if (!myId || !remoteId) return true;
     return String(myId).localeCompare(String(remoteId)) < 0;
+  }
+
+  function shouldAcceptSignalFrom(fromId) {
+    const myInfo = users[myId];
+    const peerInfo = users[fromId];
+    if (!myInfo || !peerInfo) return false;
+    if (myInfo.role === "admin") {
+      return myTargetGroups.includes(peerInfo.group);
+    }
+    const sameGroup = peerInfo.group === myInfo.group;
+    const eitherAdmin = peerInfo.role === "admin" || myInfo.role === "admin";
+    return sameGroup || eitherAdmin;
   }
 
   function ensurePeer(peerId, label='Usuario') {
@@ -165,23 +173,25 @@
     audio.autoplay = true;
     audio.playsInline = true;
     audio.controls = true;
+    audio.muted = true;
     card.appendChild(title);
     card.appendChild(audio);
     audiosWrap.appendChild(card);
 
     pc.ontrack = ev => {
-      const stream = ev.streams?.[0] || new MediaStream([ev.track]);
-      audio.srcObject = stream;
-
-      // 🔥 Fuerza play solo tras interacción
-      const tryPlay = () => audio.play().catch(() => {});
-      if (document.body.matches(':hover')) {
-        tryPlay(); // ya hay interacción
-      } else {
-        document.addEventListener('click', tryPlay, { once: true });
-        document.addEventListener('touchstart', tryPlay, { once: true });
-      }
+  const stream = ev.streams?.[0] || new MediaStream([ev.track]);
+  audio.srcObject = stream;
+  audio.play().catch(() => {
+    console.warn('[Web] Autoplay bloqueado → esperando clic');
+    const unlock = () => {
+      audio.play().catch(() => {});
+      document.removeEventListener('click', unlock);
+      document.removeEventListener('touchstart', unlock);
     };
+    document.addEventListener('click', unlock, { once: true });
+    document.addEventListener('touchstart', unlock, { once: true });
+  });
+};
 
     const sess = { pc, audioEl: audio, cardEl: card, polite: isPoliteAgainst(peerId), makingOffer: false, pendingCandidates: [] };
 
@@ -357,6 +367,7 @@
           break;
 
         case 'signal':
+          if (!shouldAcceptSignalFrom(msg.fromId)) return; // 🔥 IGNORAR si no debe conectarse
           await handleSignalFrom(msg.fromId, msg.payload || {});
           break;
       }
@@ -384,6 +395,7 @@
     myKey  = keyInput.value.trim();
     myGroup = groupInput.value.trim() || 'default';
     myRole  = roleInput.value.trim() || 'user';
+    myTargetGroups = [myGroup]; // <-- NUEVO: inicializa con su grupo
 
     if (!myName || !myRoom || !myKey) { L.login('Completa todos los campos','err'); return; }
     manualLeave = false;
